@@ -239,3 +239,73 @@ static uint64_t find_page(DB *db, uint16_t need)
     db->page_count = pid + 1;        /* materialised on disk by page_write */
     return pid;
 }
+
+/* ====================================================================== */
+/* Open / rebuild / close                                                 */
+/* ====================================================================== */
+
+/* Scan all data pages and rebuild the in-memory directory + free map. */
+static void rebuild_index(DB *db)
+{
+    dir_init(&db->dir);
+    page_free_ensure(db, db->page_count ? db->page_count - 1 : 0);
+
+    uint8_t page[PAGE_SIZE];
+    for (uint64_t pid = 1; pid < db->page_count; pid++) {
+        page_read(db, pid, page);
+        const PageHeader *h = (const PageHeader *)page;
+        for (uint16_t s = 0; s < h->n_slots; s++) {
+            uint16_t rlen;
+            const uint8_t *rec = page_slot_ptr(page, s, &rlen);
+            if (!rec) continue;
+            const char *k; uint16_t kl; const uint8_t *v; uint32_t vl;
+            record_parse(rec, &k, &kl, &v, &vl);
+            char *keyz = malloc(kl + 1);
+            memcpy(keyz, k, kl); keyz[kl] = '\0';
+            dir_put(&db->dir, keyz, pid, s);
+            free(keyz);
+        }
+        db->page_free[pid] = page_free_space(page);
+    }
+}
+
+DB *db_open(const char *data_path)
+{
+    DB *db = calloc(1, sizeof(*db));
+    if (!db) return NULL;
+
+    db->data_fd = open(data_path, O_RDWR | O_CREAT, 0600);
+    if (db->data_fd < 0) { perror("open data"); free(db); return NULL; }
+
+    off_t sz = lseek(db->data_fd, 0, SEEK_END);
+    if (sz == 0) {
+        /* fresh store: write the header page 0 */
+        uint8_t p0[PAGE_SIZE];
+        memset(p0, 0, PAGE_SIZE);
+        memcpy(p0, DURAKV_MAGIC, 8);
+        uint32_t ver = DURAKV_VERSION, ps = PAGE_SIZE;
+        memcpy(p0 + 8, &ver, 4);
+        memcpy(p0 + 12, &ps, 4);
+        if (pwrite(db->data_fd, p0, PAGE_SIZE, 0) != (ssize_t)PAGE_SIZE) {
+            perror("init header"); close(db->data_fd); free(db); return NULL;
+        }
+        fsync(db->data_fd);
+        db->page_count = 1;
+    } else {
+        db->page_count = (uint64_t)(sz / PAGE_SIZE);
+        if (db->page_count == 0) db->page_count = 1;
+    }
+
+    rebuild_index(db);           /* directory reflects the on-disk pages */
+    return db;
+}
+
+void db_close(DB *db)
+{
+    if (!db) return;
+    fsync(db->data_fd);
+    dir_free(&db->dir);
+    free(db->page_free);
+    close(db->data_fd);
+    free(db);
+}
