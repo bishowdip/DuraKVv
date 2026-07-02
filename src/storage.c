@@ -241,6 +241,99 @@ static uint64_t find_page(DB *db, uint16_t need)
 }
 
 /* ====================================================================== */
+/* Mutations                                                              */
+/* ====================================================================== */
+
+/*
+ * Core of SET. Builds the record, then decides where it goes: update-in-place
+ * if the key exists and its page still has room, otherwise tombstone the old
+ * copy and insert onto a page with space (allocating a new one if needed).
+ *
+ * KNOWN GAP: an update that moves a record touches two pages with two separate
+ * writes, so a crash between them can leave a stale duplicate or drop the key.
+ * Write-ahead logging (the next layer) closes this by making the pair atomic.
+ */
+int db_set(DB *db, const char *key, const void *val, uint32_t vlen)
+{
+    size_t klen = strlen(key);
+    if (klen == 0 || klen > 0xFFFF) return DK_INVAL;
+
+    uint8_t rec[PAGE_SIZE];
+    uint16_t reclen = record_build(rec, key, (uint16_t)klen, val, vlen);
+    if (reclen > MAX_RECORD) return DK_TOOBIG;
+
+    /* a record also consumes one slot-directory entry */
+    uint16_t need = (uint16_t)(reclen + sizeof(Slot));
+
+    DirEntry *old = dir_get(&db->dir, key);
+
+    uint8_t page[PAGE_SIZE];
+    uint64_t new_page; uint16_t new_slot = 0;
+
+    if (old && db->page_free[old->page_id] >= need) {
+        /* update in place: tombstone + insert on the same page */
+        new_page = old->page_id;
+        page_read(db, new_page, page);
+        page_tombstone(page, old->slot);
+        if (page_insert(page, rec, reclen, &new_slot) != 0) return DK_IO;
+        if (page_write(db, new_page, page) != DK_OK) return DK_IO;
+        db->page_free[new_page] = page_free_space(page);
+    } else {
+        if (old) {
+            /* tombstone the old record on its page */
+            page_read(db, old->page_id, page);
+            page_tombstone(page, old->slot);
+            if (page_write(db, old->page_id, page) != DK_OK) return DK_IO;
+            db->page_free[old->page_id] = page_free_space(page);
+        }
+        new_page = find_page(db, need);
+        page_read(db, new_page, page);
+        if (page_insert(page, rec, reclen, &new_slot) != 0) return DK_IO;
+        if (page_write(db, new_page, page) != DK_OK) return DK_IO;
+        page_free_ensure(db, new_page);
+        db->page_free[new_page] = page_free_space(page);
+    }
+
+    dir_put(&db->dir, key, new_page, new_slot);
+    return DK_OK;
+}
+
+int db_get(DB *db, const char *key, void *valbuf, uint32_t buflen,
+           uint32_t *vlen_out)
+{
+    DirEntry *e = dir_get(&db->dir, key);
+    if (!e) return DK_NOTFOUND;
+
+    uint8_t page[PAGE_SIZE];
+    page_read(db, e->page_id, page);
+    uint16_t rlen;
+    const uint8_t *rec = page_slot_ptr(page, e->slot, &rlen);
+    if (!rec) return DK_NOTFOUND;
+
+    const char *k; uint16_t kl; const uint8_t *v; uint32_t vl;
+    record_parse(rec, &k, &kl, &v, &vl);
+    if (vlen_out) *vlen_out = vl;
+    uint32_t n = vl < buflen ? vl : buflen;
+    if (valbuf && n) memcpy(valbuf, v, n);
+    return DK_OK;
+}
+
+int db_del(DB *db, const char *key)
+{
+    DirEntry *old = dir_get(&db->dir, key);
+    if (!old) return DK_NOTFOUND;
+
+    uint8_t page[PAGE_SIZE];
+    page_read(db, old->page_id, page);
+    page_tombstone(page, old->slot);
+    if (page_write(db, old->page_id, page) != DK_OK) return DK_IO;
+    db->page_free[old->page_id] = page_free_space(page);
+
+    dir_del(&db->dir, key);
+    return DK_OK;
+}
+
+/* ====================================================================== */
 /* Open / rebuild / close                                                 */
 /* ====================================================================== */
 
