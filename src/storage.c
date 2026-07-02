@@ -93,3 +93,29 @@ const uint8_t *page_slot_ptr(const uint8_t *page, uint16_t slot, uint16_t *len_o
     if (len_out) *len_out = slots[slot].len;
     return page + slots[slot].off;
 }
+
+/* ====================================================================== */
+/* Record framing                                                         */
+/* ====================================================================== */
+
+uint16_t record_build(uint8_t *buf, const char *key, uint16_t klen,
+                      const void *val, uint32_t vlen)
+{
+    uint8_t *p = buf;
+    memcpy(p, &klen, 2);              p += 2;
+    memcpy(p, key, klen);            p += klen;
+    memcpy(p, &vlen, 4);             p += 4;
+    memcpy(p, val, vlen);           p += vlen;
+    return (uint16_t)(p - buf);
+}
+
+void record_parse(const uint8_t *rec, const char **key, uint16_t *klen,
+                  const uint8_t **val, uint32_t *vlen)
+{
+    uint16_t kl; uint32_t vl;
+    const uint8_t *p = rec;
+    memcpy(&kl, p, 2);   p += 2;
+    *key  = (const char *)p;  *klen = kl;   p += kl;
+    memcpy(&vl, p, 4);   p += 4;
+    *val  = p;  *vlen = vl;
+}
