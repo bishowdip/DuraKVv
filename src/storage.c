@@ -119,3 +119,22 @@ void record_parse(const uint8_t *rec, const char **key, uint16_t *klen,
     memcpy(&vl, p, 4);   p += 4;
     *val  = p;  *vlen = vl;
 }
+
+/* ====================================================================== */
+/* Raw page I/O                                                           */
+/* ====================================================================== */
+
+int page_read(DB *db, uint64_t page_id, uint8_t *buf)
+{
+    ssize_t n = pread(db->data_fd, buf, PAGE_SIZE, (off_t)page_id * PAGE_SIZE);
+    if (n < (ssize_t)PAGE_SIZE) page_init(buf, page_id);   /* hole/EOF -> empty */
+    return DK_OK;
+}
+
+int page_write(DB *db, uint64_t page_id, const uint8_t *buf)
+{
+    ssize_t n = pwrite(db->data_fd, buf, PAGE_SIZE, (off_t)page_id * PAGE_SIZE);
+    if (n != (ssize_t)PAGE_SIZE) return DK_IO;
+    if (page_id + 1 > db->page_count) db->page_count = page_id + 1;
+    return DK_OK;
+}
