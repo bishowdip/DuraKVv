@@ -3,11 +3,23 @@
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -g -Iinclude
 
-.PHONY: all clean
+CORE    := src/storage.c
 
-all:
+.PHONY: all tests test clean
+
+all: tests
+
+# --- unit tests ----------------------------------------------------------
+tests: test_storage
+
+test_storage: $(CORE) tests/test_storage.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+test: tests
+	@echo "== test_storage ==" && ./test_storage
 
 clean:
+	rm -f test_storage
 	rm -f *.o
-	rm -f *.db *.log
+	rm -f *.db *.log /tmp/durakv_*.db
 	rm -rf *.dSYM
