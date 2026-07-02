@@ -208,3 +208,34 @@ static void dir_del(Dir *d, const char *key)
         pp = &(*pp)->next;
     }
 }
+
+/* ====================================================================== */
+/* Free-space tracking                                                    */
+/* ====================================================================== */
+
+static void page_free_ensure(DB *db, uint64_t page_id)
+{
+    if ((size_t)page_id < db->page_free_cap) return;
+    size_t ncap = db->page_free_cap ? db->page_free_cap : 16;
+    while (ncap <= (size_t)page_id) ncap *= 2;
+    db->page_free = realloc(db->page_free, ncap * sizeof(uint16_t));
+    for (size_t i = db->page_free_cap; i < ncap; i++) db->page_free[i] = 0;
+    db->page_free_cap = ncap;
+}
+
+/* Find a data page (id >= 1) with at least `need` bytes free, allocating a
+ * fresh page at the end of the file if none qualifies. */
+static uint64_t find_page(DB *db, uint16_t need)
+{
+    for (uint64_t pid = 1; pid < db->page_count; pid++)
+        if (db->page_free[pid] >= need) return pid;
+
+    /* allocate a new page at the end */
+    uint64_t pid = db->page_count;
+    page_free_ensure(db, pid);
+    uint8_t empty[PAGE_SIZE];
+    page_init(empty, pid);
+    db->page_free[pid] = page_free_space(empty);
+    db->page_count = pid + 1;        /* materialised on disk by page_write */
+    return pid;
+}
