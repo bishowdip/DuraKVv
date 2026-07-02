@@ -138,3 +138,73 @@ int page_write(DB *db, uint64_t page_id, const uint8_t *buf)
     if (page_id + 1 > db->page_count) db->page_count = page_id + 1;
     return DK_OK;
 }
+
+/* ====================================================================== */
+/* Key directory (chained hash map)                                       */
+/* ====================================================================== */
+
+/* djb2 string hash: fast, simple, good enough spread for the directory. Lookup
+ * is O(1) average (uniform hashing) but O(n) worst case if many keys collide
+ * into one bucket -- acceptable here, resizable in a production system. */
+static size_t hash_key(const char *s)
+{
+    size_t h = 5381;
+    for (; *s; s++) h = ((h << 5) + h) ^ (unsigned char)*s;   /* djb2 */
+    return h;
+}
+
+static void dir_init(Dir *d)
+{
+    d->nbuckets = 1024;
+    d->count    = 0;
+    d->buckets  = calloc(d->nbuckets, sizeof(DirEntry *));
+}
+
+static void dir_free(Dir *d)
+{
+    if (!d->buckets) return;
+    for (size_t i = 0; i < d->nbuckets; i++) {
+        DirEntry *e = d->buckets[i];
+        while (e) { DirEntry *nx = e->next; free(e->key); free(e); e = nx; }
+    }
+    free(d->buckets);
+    d->buckets = NULL;
+}
+
+static DirEntry *dir_get(Dir *d, const char *key)
+{
+    size_t b = hash_key(key) % d->nbuckets;
+    for (DirEntry *e = d->buckets[b]; e; e = e->next)
+        if (strcmp(e->key, key) == 0) return e;
+    return NULL;
+}
+
+static void dir_put(Dir *d, const char *key, uint64_t page_id, uint16_t slot)
+{
+    DirEntry *e = dir_get(d, key);
+    if (e) { e->page_id = page_id; e->slot = slot; return; }
+    size_t b = hash_key(key) % d->nbuckets;
+    e = malloc(sizeof(*e));
+    e->key = strdup(key);
+    e->page_id = page_id;
+    e->slot = slot;
+    e->next = d->buckets[b];
+    d->buckets[b] = e;
+    d->count++;
+}
+
+static void dir_del(Dir *d, const char *key)
+{
+    size_t b = hash_key(key) % d->nbuckets;
+    DirEntry **pp = &d->buckets[b];
+    while (*pp) {
+        if (strcmp((*pp)->key, key) == 0) {
+            DirEntry *dead = *pp;
+            *pp = dead->next;
+            free(dead->key); free(dead);
+            d->count--;
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+}
