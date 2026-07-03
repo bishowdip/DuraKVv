@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# DuraKV -- the repository tracks ONLY source code and a single README.
+# Reports, figures, notes, the project spec and any other docs are kept
+# locally and submitted separately; they must never be committed.
+# ---------------------------------------------------------------------------
+
+# build artifacts (compiled binaries live at the repo root, never tracked)
+/test_storage
+*.o
+*.dSYM/
+
+# runtime data files
+*.db
+*.log
+*.snap
+
+# documentation / reports / figures -- LOCAL ONLY (only README.md is tracked)
+*.md
+!README.md
+/docs/
+/notes/
+/report/
+/reports/
+/figures/
+*.pdf
+*.docx
+*.pptx
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+
+# macOS
+.DS_Store
