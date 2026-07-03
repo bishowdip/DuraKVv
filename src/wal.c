@@ -95,3 +95,14 @@ uint64_t wal_append(DB *db, WalType type, uint64_t txn_id, uint64_t prev_lsn,
     free(buf);
     return lsn;
 }
+
+void wal_fsync(DB *db)
+{
+#if defined(__APPLE__)
+    /* fsync() on macOS does not flush the drive's own cache; F_FULLFSYNC
+     * does. Fall back to fsync() if the device rejects it. */
+    if (fcntl(db->wal_fd, F_FULLFSYNC) == -1) fsync(db->wal_fd);
+#else
+    fdatasync(db->wal_fd);
+#endif
+}
