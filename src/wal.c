@@ -106,3 +106,77 @@ void wal_fsync(DB *db)
     fdatasync(db->wal_fd);
 #endif
 }
+
+/* ---- scan -------------------------------------------------------------- */
+
+static int read_full(int fd, off_t off, uint8_t *buf, size_t len)
+{
+    size_t got = 0;
+    while (got < len) {
+        ssize_t n = pread(fd, buf + got, len - got, off + (off_t)got);
+        if (n <= 0) return -1;       /* EOF or error -> short/truncated */
+        got += (size_t)n;
+    }
+    return 0;
+}
+
+/*
+ * Read the whole log from the start into an array of parsed records. Stops at
+ * the first sign of an incomplete/corrupt record -- a clean EOF, an impossibly
+ * small length, a short read (torn tail), or a CRC mismatch -- and returns only
+ * the records before it. This is precisely the crash-tolerance guarantee: a
+ * record half-written when the power failed is never replayed. Caller frees the
+ * result with wal_records_free().
+ */
+size_t wal_scan(DB *db, WalRecord **out)
+{
+    size_t cap = 64, n = 0;
+    WalRecord *recs = malloc(cap * sizeof(*recs));
+    off_t off = 0;
+
+    for (;;) {
+        uint8_t lenbuf[4];
+        if (read_full(db->wal_fd, off, lenbuf, 4) != 0) break;   /* clean EOF */
+        uint32_t body;
+        memcpy(&body, lenbuf, 4);
+        if (body < 8 + 8 + 8 + 1 + 8 + 4 + 4 + 4) break;         /* nonsense */
+
+        uint8_t *bodybuf = malloc(body);
+        if (read_full(db->wal_fd, off + 4, bodybuf, body) != 0) {
+            free(bodybuf); break;                                /* torn tail */
+        }
+
+        /* verify crc over everything except the trailing 4-byte crc */
+        uint32_t want;
+        memcpy(&want, bodybuf + body - 4, 4);
+        if (wal_crc32(bodybuf, body - 4) != want) { free(bodybuf); break; }
+
+        uint8_t *p = bodybuf;
+        WalRecord r; memset(&r, 0, sizeof(r));
+        memcpy(&r.lsn, p, 8);       p += 8;
+        memcpy(&r.prev_lsn, p, 8);  p += 8;
+        memcpy(&r.txn_id, p, 8);    p += 8;
+        r.type = *p;                p += 1;
+        memcpy(&r.page_id, p, 8);   p += 8;
+        memcpy(&r.before_len, p, 4); p += 4;
+        if (r.before_len) { r.before = malloc(r.before_len);
+                            memcpy(r.before, p, r.before_len); p += r.before_len; }
+        memcpy(&r.after_len, p, 4);  p += 4;
+        if (r.after_len)  { r.after = malloc(r.after_len);
+                            memcpy(r.after, p, r.after_len);  p += r.after_len; }
+        free(bodybuf);
+
+        if (n == cap) { cap *= 2; recs = realloc(recs, cap * sizeof(*recs)); }
+        recs[n++] = r;
+        off += 4 + body;
+    }
+
+    *out = recs;
+    return n;
+}
+
+void wal_records_free(WalRecord *recs, size_t n)
+{
+    for (size_t i = 0; i < n; i++) { free(recs[i].before); free(recs[i].after); }
+    free(recs);
+}
