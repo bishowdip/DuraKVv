@@ -294,9 +294,9 @@ static int commit_mods(DB *db, Mod *mods, int nmods)
  * if the key exists and its page still has room, otherwise tombstone the old
  * copy and insert onto a page with space (allocating a new one if needed).
  *
- * KNOWN GAP: an update that moves a record touches two pages with two separate
- * writes, so a crash between them can leave a stale duplicate or drop the key.
- * Write-ahead logging (the next layer) closes this by making the pair atomic.
+ * All the touched pages are gathered as Mods and committed atomically via the
+ * WAL, so a crash mid-update never leaves a half-applied key. The directory is
+ * updated only after the commit succeeds.
  */
 int db_set(DB *db, const char *key, const void *val, uint32_t vlen)
 {
@@ -312,32 +312,38 @@ int db_set(DB *db, const char *key, const void *val, uint32_t vlen)
 
     DirEntry *old = dir_get(&db->dir, key);
 
-    uint8_t page[PAGE_SIZE];
+    Mod mods[2];
+    int nmods = 0;
     uint64_t new_page; uint16_t new_slot = 0;
 
     if (old && db->page_free[old->page_id] >= need) {
         /* update in place: tombstone + insert on the same page */
-        new_page = old->page_id;
-        page_read(db, new_page, page);
-        page_tombstone(page, old->slot);
-        if (page_insert(page, rec, reclen, &new_slot) != 0) return DK_IO;
-        if (page_write(db, new_page, page) != DK_OK) return DK_IO;
-        db->page_free[new_page] = page_free_space(page);
+        Mod *m = &mods[nmods++];
+        m->page_id = old->page_id;
+        page_read(db, m->page_id, m->before);
+        memcpy(m->after, m->before, PAGE_SIZE);
+        page_tombstone(m->after, old->slot);
+        if (page_insert(m->after, rec, reclen, &new_slot) != 0) return DK_IO;
+        new_page = m->page_id;
     } else {
         if (old) {
             /* tombstone the old record on its page */
-            page_read(db, old->page_id, page);
-            page_tombstone(page, old->slot);
-            if (page_write(db, old->page_id, page) != DK_OK) return DK_IO;
-            db->page_free[old->page_id] = page_free_space(page);
+            Mod *m = &mods[nmods++];
+            m->page_id = old->page_id;
+            page_read(db, m->page_id, m->before);
+            memcpy(m->after, m->before, PAGE_SIZE);
+            page_tombstone(m->after, old->slot);
         }
         new_page = find_page(db, need);
-        page_read(db, new_page, page);
-        if (page_insert(page, rec, reclen, &new_slot) != 0) return DK_IO;
-        if (page_write(db, new_page, page) != DK_OK) return DK_IO;
-        page_free_ensure(db, new_page);
-        db->page_free[new_page] = page_free_space(page);
+        Mod *m = &mods[nmods++];
+        m->page_id = new_page;
+        page_read(db, m->page_id, m->before);
+        memcpy(m->after, m->before, PAGE_SIZE);
+        if (page_insert(m->after, rec, reclen, &new_slot) != 0) return DK_IO;
     }
+
+    int rc = commit_mods(db, mods, nmods);
+    if (rc != DK_OK) return rc;
 
     dir_put(&db->dir, key, new_page, new_slot);
     return DK_OK;
@@ -368,11 +374,14 @@ int db_del(DB *db, const char *key)
     DirEntry *old = dir_get(&db->dir, key);
     if (!old) return DK_NOTFOUND;
 
-    uint8_t page[PAGE_SIZE];
-    page_read(db, old->page_id, page);
-    page_tombstone(page, old->slot);
-    if (page_write(db, old->page_id, page) != DK_OK) return DK_IO;
-    db->page_free[old->page_id] = page_free_space(page);
+    Mod m;
+    m.page_id = old->page_id;
+    page_read(db, m.page_id, m.before);
+    memcpy(m.after, m.before, PAGE_SIZE);
+    page_tombstone(m.after, old->slot);
+
+    int rc = commit_mods(db, &m, 1);
+    if (rc != DK_OK) return rc;
 
     dir_del(&db->dir, key);
     return DK_OK;
