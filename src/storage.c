@@ -245,6 +245,47 @@ static uint64_t find_page(DB *db, uint16_t need)
 }
 
 /* ====================================================================== */
+/* Transactional commit                                                   */
+/* ====================================================================== */
+
+/* A page touched by the current transaction. */
+typedef struct {
+    uint64_t page_id;
+    uint8_t  before[PAGE_SIZE];
+    uint8_t  after[PAGE_SIZE];
+} Mod;
+
+/* Log [BEGIN, UPDATE..., COMMIT], fsync the WAL, then write the data pages.
+ * This is the durability heartbeat: the commit is durable the instant the WAL
+ * fsync returns, and the data pages are only written back afterwards -- so a
+ * crash between the two is repaired by replaying the log (recovery, next layer). */
+static int commit_mods(DB *db, Mod *mods, int nmods)
+{
+    uint64_t txn = db->next_txn++;
+    uint64_t prev = wal_append(db, WAL_BEGIN, txn, 0, 0, NULL, 0, NULL, 0);
+
+    for (int i = 0; i < nmods; i++) {
+        /* stamp the after-image with the LSN this UPDATE will receive, so
+         * recovery's page_lsn comparison is exact and idempotent. */
+        page_set_lsn(mods[i].after, db->next_lsn);
+        prev = wal_append(db, WAL_UPDATE, txn, prev, mods[i].page_id,
+                          mods[i].before, PAGE_SIZE,
+                          mods[i].after,  PAGE_SIZE);
+    }
+    wal_append(db, WAL_COMMIT, txn, prev, 0, NULL, 0, NULL, 0);
+
+    wal_fsync(db);               /* <-- the commit is durable here */
+
+    /* now (and only now, post-fsync) write the after-images to data.db */
+    for (int i = 0; i < nmods; i++) {
+        page_write(db, mods[i].page_id, mods[i].after);
+        page_free_ensure(db, mods[i].page_id);
+        db->page_free[mods[i].page_id] = page_free_space(mods[i].after);
+    }
+    return DK_OK;
+}
+
+/* ====================================================================== */
 /* Mutations                                                              */
 /* ====================================================================== */
 
