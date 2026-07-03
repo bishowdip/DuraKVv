@@ -17,6 +17,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "storage.h"
+#include "wal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -365,7 +366,7 @@ static void rebuild_index(DB *db)
     }
 }
 
-DB *db_open(const char *data_path)
+DB *db_open(const char *data_path, const char *wal_path)
 {
     DB *db = calloc(1, sizeof(*db));
     if (!db) return NULL;
@@ -392,6 +393,12 @@ DB *db_open(const char *data_path)
         if (db->page_count == 0) db->page_count = 1;
     }
 
+    db->wal_fd = open(wal_path, O_RDWR | O_CREAT | O_APPEND, 0600);
+    if (db->wal_fd < 0) { perror("open wal"); close(db->data_fd); free(db); return NULL; }
+
+    db->next_lsn = 1;
+    db->next_txn = 1;
+
     rebuild_index(db);           /* directory reflects the on-disk pages */
     return db;
 }
@@ -400,8 +407,10 @@ void db_close(DB *db)
 {
     if (!db) return;
     fsync(db->data_fd);
+    fsync(db->wal_fd);
     dir_free(&db->dir);
     free(db->page_free);
     close(db->data_fd);
+    close(db->wal_fd);
     free(db);
 }

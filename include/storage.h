@@ -82,8 +82,8 @@ enum {
 
 /* ---- public key/value API ---------------------------------------------- */
 
-/* Open (or create) the store and return a handle. */
-DB  *db_open(const char *data_path);
+/* Open (or create) the store and its write-ahead log, and return a handle. */
+DB  *db_open(const char *data_path, const char *wal_path);
 void db_close(DB *db);
 
 int  db_set(DB *db, const char *key, const void *val, uint32_t vlen);
