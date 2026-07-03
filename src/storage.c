@@ -43,6 +43,9 @@ void page_init(uint8_t *page, uint64_t page_id)
     h->free_end = PAGE_SIZE;     /* record area is empty; grows downward */
 }
 
+uint64_t page_get_lsn(const uint8_t *page) { return ((const PageHeader *)page)->page_lsn; }
+void     page_set_lsn(uint8_t *page, uint64_t lsn) { ((PageHeader *)page)->page_lsn = lsn; }
+
 uint16_t page_free_space(const uint8_t *page)
 {
     const PageHeader *h = (const PageHeader *)page;

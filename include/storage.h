@@ -7,8 +7,9 @@
  *   - page 0 is the immutable header page (magic / version / page_size).
  *   - pages 1..N-1 are slotted data pages holding {key,value} records.
  *
- * Durability (write-ahead logging + crash recovery) is the next layer up;
- * for now a mutation is applied straight to the page file.
+ * Durability comes from the write-ahead log (see wal.h): every mutation is
+ * logged and fsync'd before its data pages are written back. Crash recovery
+ * (replaying the log) is the next layer up.
  */
 #ifndef DURAKV_STORAGE_H
 #define DURAKV_STORAGE_H
@@ -61,7 +62,10 @@ typedef struct {
 
 typedef struct DB {
     int       data_fd;          /* data.db                                   */
+    int       wal_fd;           /* wal.log (O_APPEND for writes)             */
     uint64_t  page_count;       /* number of pages in the data file          */
+    uint64_t  next_lsn;         /* next log sequence number to hand out       */
+    uint64_t  next_txn;         /* next transaction id                        */
     Dir       dir;              /* key -> location index                     */
     uint16_t *page_free;        /* free bytes per page (index by page id)    */
     size_t    page_free_cap;    /* capacity of page_free[]                   */
@@ -98,6 +102,8 @@ void        page_tombstone(uint8_t *page, uint16_t slot);
 const uint8_t *page_slot_ptr(const uint8_t *page, uint16_t slot,
                              uint16_t *len_out);  /* NULL if empty/oob */
 uint16_t    page_free_space(const uint8_t *page);
+uint64_t    page_get_lsn(const uint8_t *page);
+void        page_set_lsn(uint8_t *page, uint64_t lsn);
 
 /* Raw page I/O against data.db. page_read returns a valid empty page for
  * ids past EOF; page_write extends the file as needed. */
