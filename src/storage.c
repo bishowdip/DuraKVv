@@ -17,6 +17,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "storage.h"
+#include "wal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +43,9 @@ void page_init(uint8_t *page, uint64_t page_id)
     h->n_slots  = 0;
     h->free_end = PAGE_SIZE;     /* record area is empty; grows downward */
 }
+
+uint64_t page_get_lsn(const uint8_t *page) { return ((const PageHeader *)page)->page_lsn; }
+void     page_set_lsn(uint8_t *page, uint64_t lsn) { ((PageHeader *)page)->page_lsn = lsn; }
 
 uint16_t page_free_space(const uint8_t *page)
 {
@@ -241,6 +245,47 @@ static uint64_t find_page(DB *db, uint16_t need)
 }
 
 /* ====================================================================== */
+/* Transactional commit                                                   */
+/* ====================================================================== */
+
+/* A page touched by the current transaction. */
+typedef struct {
+    uint64_t page_id;
+    uint8_t  before[PAGE_SIZE];
+    uint8_t  after[PAGE_SIZE];
+} Mod;
+
+/* Log [BEGIN, UPDATE..., COMMIT], fsync the WAL, then write the data pages.
+ * This is the durability heartbeat: the commit is durable the instant the WAL
+ * fsync returns, and the data pages are only written back afterwards -- so a
+ * crash between the two is repaired by replaying the log (recovery, next layer). */
+static int commit_mods(DB *db, Mod *mods, int nmods)
+{
+    uint64_t txn = db->next_txn++;
+    uint64_t prev = wal_append(db, WAL_BEGIN, txn, 0, 0, NULL, 0, NULL, 0);
+
+    for (int i = 0; i < nmods; i++) {
+        /* stamp the after-image with the LSN this UPDATE will receive, so
+         * recovery's page_lsn comparison is exact and idempotent. */
+        page_set_lsn(mods[i].after, db->next_lsn);
+        prev = wal_append(db, WAL_UPDATE, txn, prev, mods[i].page_id,
+                          mods[i].before, PAGE_SIZE,
+                          mods[i].after,  PAGE_SIZE);
+    }
+    wal_append(db, WAL_COMMIT, txn, prev, 0, NULL, 0, NULL, 0);
+
+    wal_fsync(db);               /* <-- the commit is durable here */
+
+    /* now (and only now, post-fsync) write the after-images to data.db */
+    for (int i = 0; i < nmods; i++) {
+        page_write(db, mods[i].page_id, mods[i].after);
+        page_free_ensure(db, mods[i].page_id);
+        db->page_free[mods[i].page_id] = page_free_space(mods[i].after);
+    }
+    return DK_OK;
+}
+
+/* ====================================================================== */
 /* Mutations                                                              */
 /* ====================================================================== */
 
@@ -249,9 +294,9 @@ static uint64_t find_page(DB *db, uint16_t need)
  * if the key exists and its page still has room, otherwise tombstone the old
  * copy and insert onto a page with space (allocating a new one if needed).
  *
- * KNOWN GAP: an update that moves a record touches two pages with two separate
- * writes, so a crash between them can leave a stale duplicate or drop the key.
- * Write-ahead logging (the next layer) closes this by making the pair atomic.
+ * All the touched pages are gathered as Mods and committed atomically via the
+ * WAL, so a crash mid-update never leaves a half-applied key. The directory is
+ * updated only after the commit succeeds.
  */
 int db_set(DB *db, const char *key, const void *val, uint32_t vlen)
 {
@@ -267,32 +312,38 @@ int db_set(DB *db, const char *key, const void *val, uint32_t vlen)
 
     DirEntry *old = dir_get(&db->dir, key);
 
-    uint8_t page[PAGE_SIZE];
+    Mod mods[2];
+    int nmods = 0;
     uint64_t new_page; uint16_t new_slot = 0;
 
     if (old && db->page_free[old->page_id] >= need) {
         /* update in place: tombstone + insert on the same page */
-        new_page = old->page_id;
-        page_read(db, new_page, page);
-        page_tombstone(page, old->slot);
-        if (page_insert(page, rec, reclen, &new_slot) != 0) return DK_IO;
-        if (page_write(db, new_page, page) != DK_OK) return DK_IO;
-        db->page_free[new_page] = page_free_space(page);
+        Mod *m = &mods[nmods++];
+        m->page_id = old->page_id;
+        page_read(db, m->page_id, m->before);
+        memcpy(m->after, m->before, PAGE_SIZE);
+        page_tombstone(m->after, old->slot);
+        if (page_insert(m->after, rec, reclen, &new_slot) != 0) return DK_IO;
+        new_page = m->page_id;
     } else {
         if (old) {
             /* tombstone the old record on its page */
-            page_read(db, old->page_id, page);
-            page_tombstone(page, old->slot);
-            if (page_write(db, old->page_id, page) != DK_OK) return DK_IO;
-            db->page_free[old->page_id] = page_free_space(page);
+            Mod *m = &mods[nmods++];
+            m->page_id = old->page_id;
+            page_read(db, m->page_id, m->before);
+            memcpy(m->after, m->before, PAGE_SIZE);
+            page_tombstone(m->after, old->slot);
         }
         new_page = find_page(db, need);
-        page_read(db, new_page, page);
-        if (page_insert(page, rec, reclen, &new_slot) != 0) return DK_IO;
-        if (page_write(db, new_page, page) != DK_OK) return DK_IO;
-        page_free_ensure(db, new_page);
-        db->page_free[new_page] = page_free_space(page);
+        Mod *m = &mods[nmods++];
+        m->page_id = new_page;
+        page_read(db, m->page_id, m->before);
+        memcpy(m->after, m->before, PAGE_SIZE);
+        if (page_insert(m->after, rec, reclen, &new_slot) != 0) return DK_IO;
     }
+
+    int rc = commit_mods(db, mods, nmods);
+    if (rc != DK_OK) return rc;
 
     dir_put(&db->dir, key, new_page, new_slot);
     return DK_OK;
@@ -323,11 +374,14 @@ int db_del(DB *db, const char *key)
     DirEntry *old = dir_get(&db->dir, key);
     if (!old) return DK_NOTFOUND;
 
-    uint8_t page[PAGE_SIZE];
-    page_read(db, old->page_id, page);
-    page_tombstone(page, old->slot);
-    if (page_write(db, old->page_id, page) != DK_OK) return DK_IO;
-    db->page_free[old->page_id] = page_free_space(page);
+    Mod m;
+    m.page_id = old->page_id;
+    page_read(db, m.page_id, m.before);
+    memcpy(m.after, m.before, PAGE_SIZE);
+    page_tombstone(m.after, old->slot);
+
+    int rc = commit_mods(db, &m, 1);
+    if (rc != DK_OK) return rc;
 
     dir_del(&db->dir, key);
     return DK_OK;
@@ -362,7 +416,7 @@ static void rebuild_index(DB *db)
     }
 }
 
-DB *db_open(const char *data_path)
+DB *db_open(const char *data_path, const char *wal_path)
 {
     DB *db = calloc(1, sizeof(*db));
     if (!db) return NULL;
@@ -389,6 +443,12 @@ DB *db_open(const char *data_path)
         if (db->page_count == 0) db->page_count = 1;
     }
 
+    db->wal_fd = open(wal_path, O_RDWR | O_CREAT | O_APPEND, 0600);
+    if (db->wal_fd < 0) { perror("open wal"); close(db->data_fd); free(db); return NULL; }
+
+    db->next_lsn = 1;
+    db->next_txn = 1;
+
     rebuild_index(db);           /* directory reflects the on-disk pages */
     return db;
 }
@@ -397,8 +457,10 @@ void db_close(DB *db)
 {
     if (!db) return;
     fsync(db->data_fd);
+    fsync(db->wal_fd);
     dir_free(&db->dir);
     free(db->page_free);
     close(db->data_fd);
+    close(db->wal_fd);
     free(db);
 }

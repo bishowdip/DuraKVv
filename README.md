@@ -28,15 +28,30 @@ pages (4 KiB by default):
   gives O(1) average lookup. It is never persisted — it is rebuilt by
   scanning the pages at open, so it can never disagree with disk.
 
-Known gap, on purpose: mutations write pages in place, so a crash mid-update
-can tear a multi-page update. The next layer (write-ahead logging + crash
-recovery) closes exactly that gap.
+## Durability (write-ahead logging)
+
+Every mutation goes through the write-ahead log (`src/wal.c`) before it touches
+`data.db`:
+
+1. The changed pages are gathered and logged as `BEGIN` / `UPDATE...` /
+   `COMMIT` records, appended to `wal.log`. Each record is length-prefixed and
+   carries a **CRC32** plus the full **before- and after-image** of the page.
+2. On `COMMIT` the WAL is `fsync`'d (macOS: `F_FULLFSYNC`) **before** the data
+   pages are written back — so an acknowledged write is already on stable
+   storage, and the data file is always allowed to lag the log.
+3. A crash mid-append leaves a torn tail; the length prefix and CRC make it
+   detectable, so the scanner (`wal_scan`) stops at the first bad record and
+   never replays a half-written one.
+
+This closes the tearing gap the storage layer left open: the log holds enough
+to redo a committed change or undo an in-flight one. Actually replaying it on
+startup — crash recovery — is the next layer.
 
 ## Layout
 
 ```
-include/  storage.h
-src/      storage.c
+include/  storage.h wal.h
+src/      storage.c wal.c
 tests/    test_storage.c
 ```
 

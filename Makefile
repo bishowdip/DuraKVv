@@ -3,7 +3,7 @@
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -g -Iinclude
 
-CORE    := src/storage.c
+CORE    := src/storage.c src/wal.c
 
 .PHONY: all tests test clean
 
@@ -21,5 +21,5 @@ test: tests
 clean:
 	rm -f test_storage
 	rm -f *.o
-	rm -f *.db *.log /tmp/durakv_*.db
+	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log
 	rm -rf *.dSYM
