@@ -21,5 +21,5 @@ test: tests
 clean:
 	rm -f test_storage
 	rm -f *.o
-	rm -f *.db *.log /tmp/durakv_*.db
+	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log
 	rm -rf *.dSYM

@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #define DATA "/tmp/durakv_storage.db"
+#define WAL  "/tmp/durakv_storage.log"
 
 static int get_eq(DB *db, const char *k, const char *expect)
 {
@@ -22,9 +23,9 @@ static int get_eq(DB *db, const char *k, const char *expect)
 
 int main(void)
 {
-    unlink(DATA);
+    unlink(DATA); unlink(WAL);
 
-    DB *db = db_open(DATA);
+    DB *db = db_open(DATA, WAL);
     assert(db);
 
     /* basic set/get */
@@ -55,7 +56,7 @@ int main(void)
     db_close(db);
 
     /* reopen: directory must be rebuilt from disk, all data intact */
-    db = db_open(DATA);
+    db = db_open(DATA, WAL);
     assert(db);
     assert(get_eq(db, "alpha", "ONE-UPDATED"));
     assert(get_eq(db, "beta", NULL));
