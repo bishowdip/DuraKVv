@@ -3,7 +3,7 @@
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -g -Iinclude
 
-CORE    := src/storage.c src/wal.c
+CORE    := src/storage.c src/wal.c src/recovery.c
 
 .PHONY: all tests test clean
 
