@@ -78,3 +78,24 @@ void replacer_destroy(Replacer *r)
 }
 
 const char *replacer_name(const Replacer *r) { return r->pol->name; }
+
+/* Events the buffer pool reports; each is dispatched through the policy vtable
+ * so FIFO and LRU react differently to the same event stream. */
+void replacer_note_load  (Replacer *r, size_t f) { r->pol->note_load(r, f); }
+void replacer_note_access(Replacer *r, size_t f) { r->pol->note_access(r, f); }
+/* Frame emptied (page removed): stamp 0 excludes it from victim selection. */
+void replacer_note_free  (Replacer *r, size_t f) { r->stamp[f] = 0; }
+
+/* The victim is the evictable frame with the smallest (oldest) stamp.
+ * Under FIFO that is the earliest-loaded page; under LRU the least-recently
+ * used -- the only difference is whether accesses re-stamp the frame. */
+int replacer_victim(Replacer *r, const unsigned char *evictable, size_t *out)
+{
+    int found = 0;
+    uint64_t best = 0;
+    for (size_t f = 0; f < r->n; f++) {
+        if (!evictable[f] || r->stamp[f] == 0) continue;
+        if (!found || r->stamp[f] < best) { best = r->stamp[f]; *out = f; found = 1; }
+    }
+    return found;
+}
