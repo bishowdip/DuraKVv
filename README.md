@@ -92,14 +92,29 @@ repair a torn (half-written) page.
 $ make crashtest
 iter  1: acked +25   total=25     missing=0
 ...
-crashtest: PASS -- 2492 committed keys survived 25 kill -9 cycles
+crashtest: PASS -- 2142 committed keys survived 25 kill -9 cycles
 ```
+
+## Buffer pool (Phase 2)
+
+The live read/write path goes through an in-RAM page cache
+(`src/bufferpool.c`) with pluggable replacement policies (`src/replacement.c`,
+a function-pointer vtable — FIFO and LRU ship; CLOCK/LRU-K would just be more
+entries). Pages are **write-back**: a modified page is only flushed to
+`data.db` on eviction, checkpoint, or close.
+
+This tightens the durability story: because dirty pages live only in this
+process's RAM, a `kill -9` really does lose them, so recovery's redo pass is
+exercised on every restart — not masked by the OS page cache. The pool has its
+own mutex, so page faults stay safe once the store goes multi-threaded.
+
+`db_open` defaults to 64 frames with LRU; `db_open_ex` configures both.
 
 ## Layout
 
 ```
-include/  storage.h wal.h recovery.h
-src/      storage.c wal.c recovery.c durakv.c
+include/  storage.h wal.h recovery.h bufferpool.h replacement.h
+src/      storage.c wal.c recovery.c bufferpool.c replacement.c durakv.c
 tests/    test_storage.c test_wal_recovery.c
 scripts/  crashtest.sh
 ```
