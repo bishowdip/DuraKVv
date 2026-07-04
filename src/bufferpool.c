@@ -124,3 +124,77 @@ static Frame *find_resident(BufferPool *bp, uint64_t page_id, size_t *idx)
         }
     return NULL;
 }
+
+/*
+ * Pin a page and return a pointer to its bytes. This is the pool's core: it
+ * resolves a page id to a resident frame, faulting it in on a miss and evicting
+ * a victim if the pool is full. The returned buffer stays valid until the
+ * caller bp_unpin()s it. Returns NULL only if every frame is pinned (no victim
+ * available).
+ */
+uint8_t *bp_pin(BufferPool *bp, uint64_t page_id)
+{
+    pthread_mutex_lock(&bp->mtx);
+    bp->st.accesses++;
+
+    size_t idx;
+    Frame *f = find_resident(bp, page_id, &idx);
+    if (f) {                                   /* ---- HIT: page already cached ---- */
+        bp->st.hits++;
+        f->pin++;
+        replacer_note_access(bp->repl, idx);   /* LRU counts this as a recent use */
+        pthread_mutex_unlock(&bp->mtx);
+        return f->data;
+    }
+
+    /* ---- PAGE FAULT: the page is not resident, we must find a frame ---- */
+    bp->st.faults++;
+
+    /* Prefer an empty frame (the pool is still warming up). */
+    size_t target = bp->nframes;
+    for (size_t i = 0; i < bp->nframes; i++)
+        if (!bp->frames[i].valid) { target = i; break; }
+
+    if (target == bp->nframes) {               /* pool full -> must EVICT */
+        /* Build the evictable set: resident AND unpinned. The replacement
+         * policy then picks the victim among these (oldest/least-recent). */
+        unsigned char *evictable = malloc(bp->nframes);
+        for (size_t i = 0; i < bp->nframes; i++)
+            evictable[i] = (bp->frames[i].valid && bp->frames[i].pin == 0);
+        size_t victim;
+        int ok = replacer_victim(bp->repl, evictable, &victim);
+        free(evictable);
+        if (!ok) { pthread_mutex_unlock(&bp->mtx); return NULL; }  /* all pinned */
+
+        writeback(bp, &bp->frames[victim]);    /* persist victim if dirty */
+        replacer_note_free(bp->repl, victim);
+        bp->frames[victim].valid = 0;
+        bp->st.evictions++;
+        target = victim;
+    }
+
+    /* Load the requested page into the chosen frame and pin it. */
+    Frame *nf = &bp->frames[target];
+    load_from_disk(bp, page_id, nf->data);
+    nf->page_id = page_id;
+    nf->valid   = 1;
+    nf->dirty   = 0;
+    nf->pin     = 1;
+    replacer_note_load(bp->repl, target);
+    pthread_mutex_unlock(&bp->mtx);
+    return nf->data;
+}
+
+/* Release a pin. Pass dirty=1 if the caller modified the page, so it will be
+ * written back before eviction (write-back). The page only becomes eligible for
+ * eviction once its pin count returns to 0. */
+void bp_unpin(BufferPool *bp, uint64_t page_id, int dirty)
+{
+    pthread_mutex_lock(&bp->mtx);
+    Frame *f = find_resident(bp, page_id, NULL);
+    if (f) {
+        if (dirty) f->dirty = 1;               /* sticky: never clear on unpin */
+        if (f->pin > 0) f->pin--;
+    }
+    pthread_mutex_unlock(&bp->mtx);
+}
