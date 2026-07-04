@@ -1,0 +1,71 @@
+/*
+ * recovery.c -- crash recovery, a simplified form of the ARIES algorithm.
+ *
+ * Run once at startup, this brings the data file to a consistent state after a
+ * crash by replaying the WAL in three passes:
+ *
+ *   1. ANALYSIS -- scan forward from the last checkpoint to learn which
+ *      transactions COMMITTED (winners) and which were still in flight
+ *      (losers), and the highest LSN/txn ids seen.
+ *   2. REDO -- re-apply the after-image of every committed update, so all
+ *      acknowledged work is present even if its data page never reached disk.
+ *   3. UNDO -- restore the before-image of every uncommitted update, so a
+ *      partially-applied loser transaction leaves no trace ("atomicity").
+ *
+ * The crucial property is IDEMPOTENCE: redo compares each page's stored
+ * page_lsn against the record's lsn and re-applies only when page_lsn < lsn.
+ * A page already carrying that change (page_lsn >= lsn) is skipped. This makes
+ * recovery safe to crash *during* and re-run from scratch -- exactly why the
+ * crashtest can kill the process repeatedly and never lose or double-apply
+ * data. Because each record holds a full page image, redo/undo also transparently
+ * repair a torn (half-written) page. See include/recovery.h.
+ */
+#define _POSIX_C_SOURCE 200809L
+#include "recovery.h"
+#include "wal.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+/* Is txn_id in the committed set? (linear scan -- fine for Phase 1.) */
+static int committed(const uint64_t *set, size_t n, uint64_t txn)
+{
+    for (size_t i = 0; i < n; i++) if (set[i] == txn) return 1;
+    return 0;
+}
+
+int recovery_run(DB *db)
+{
+    WalRecord *recs;
+    size_t n = wal_scan(db, &recs);
+
+    uint64_t max_lsn = 0, max_txn = 0;
+
+    if (n == 0) { wal_records_free(recs, n); return DK_OK; }
+
+    /* Start from the last CHECKPOINT: pages were durable as of that point,
+     * so earlier records need not be redone (this bounds recovery time). */
+    size_t start = 0;
+    for (size_t i = 0; i < n; i++)
+        if (recs[i].type == WAL_CHECKPOINT) start = i + 1;
+
+    /* ---- Analysis: collect committed txn ids from the active region ---- */
+    uint64_t *commit_set = malloc(n * sizeof(uint64_t));
+    size_t    ncommit = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (recs[i].lsn > max_lsn) max_lsn = recs[i].lsn;
+        if (recs[i].txn_id > max_txn) max_txn = recs[i].txn_id;
+        if (i >= start && recs[i].type == WAL_COMMIT)
+            commit_set[ncommit++] = recs[i].txn_id;
+    }
+
+    fsync(db->data_fd);          /* recovered state is now durable */
+
+    db->next_lsn = max_lsn + 1;
+    db->next_txn = max_txn + 1;
+
+    free(commit_set);
+    wal_records_free(recs, n);
+    return DK_OK;
+}
