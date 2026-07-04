@@ -19,6 +19,7 @@
 #include "storage.h"
 #include "wal.h"
 #include "recovery.h"
+#include "bufferpool.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -142,6 +143,17 @@ int page_write(DB *db, uint64_t page_id, const uint8_t *buf)
     if (n != (ssize_t)PAGE_SIZE) return DK_IO;
     if (page_id + 1 > db->page_count) db->page_count = page_id + 1;
     return DK_OK;
+}
+
+/* Buffer-pool I/O callbacks: every cached read/write flows through page_read /
+ * page_write, the single place that (later) applies encryption at rest. */
+static int bp_io_read(void *ctx, uint64_t page_id, uint8_t *out)
+{
+    return page_read((DB *)ctx, page_id, out);
+}
+static int bp_io_write(void *ctx, uint64_t page_id, const uint8_t *in)
+{
+    return page_write((DB *)ctx, page_id, in);
 }
 
 /* ====================================================================== */
@@ -393,6 +405,7 @@ int db_del(DB *db, const char *key)
  * bounds recovery time and lets the WAL be trimmed. */
 void db_checkpoint(DB *db)
 {
+    bp_flush_all(db->bp);        /* push dirty frames to data.db */
     fsync(db->data_fd);          /* all data pages now durable   */
     wal_append(db, WAL_CHECKPOINT, 0, 0, db->page_count, NULL, 0, NULL, 0);
     wal_fsync(db);
@@ -429,6 +442,12 @@ static void rebuild_index(DB *db)
 
 DB *db_open(const char *data_path, const char *wal_path)
 {
+    return db_open_ex(data_path, wal_path, 64, POLICY_LRU);
+}
+
+DB *db_open_ex(const char *data_path, const char *wal_path,
+               size_t nframes, PolicyKind policy)
+{
     DB *db = calloc(1, sizeof(*db));
     if (!db) return NULL;
 
@@ -461,17 +480,26 @@ DB *db_open(const char *data_path, const char *wal_path)
     db->next_txn = 1;
 
     /* ORDER MATTERS: recover first so the pages are correct, THEN build the
-     * directory from those recovered pages. */
-    recovery_run(db);            /* analysis / redo / undo over the WAL */
-    rebuild_index(db);           /* directory reflects the recovered pages */
+     * directory from those recovered pages, THEN start caching. Doing recovery
+     * before the pool exists also guarantees the pool starts cold. */
+    recovery_run(db);            /* analysis / redo / undo (direct page I/O) */
+    rebuild_index(db);           /* directory reflects the recovered pages   */
+
+    /* the buffer pool is created last: recovery and rebuild use direct page
+     * I/O, so the pool starts cold and every later access flows through it.
+     * Route its I/O through page_read/page_write (the encryption choke point). */
+    db->bp = bp_create(db->data_fd, nframes, policy);
+    bp_set_io(db->bp, db, bp_io_read, bp_io_write);
     return db;
 }
 
 void db_close(DB *db)
 {
     if (!db) return;
+    bp_flush_all(db->bp);        /* dirty frames -> data.db */
     fsync(db->data_fd);
     fsync(db->wal_fd);
+    bp_destroy(db->bp);
     dir_free(&db->dir);
     free(db->page_free);
     close(db->data_fd);
