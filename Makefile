@@ -10,16 +10,20 @@ CORE    := src/storage.c src/wal.c src/recovery.c
 all: tests
 
 # --- unit tests ----------------------------------------------------------
-tests: test_storage
+tests: test_storage test_wal_recovery
 
 test_storage: $(CORE) tests/test_storage.c
 	$(CC) $(CFLAGS) -o $@ $^
 
+test_wal_recovery: $(CORE) tests/test_wal_recovery.c
+	$(CC) $(CFLAGS) -o $@ $^
+
 test: tests
-	@echo "== test_storage ==" && ./test_storage
+	@echo "== test_storage =="      && ./test_storage
+	@echo "== test_wal_recovery ==" && ./test_wal_recovery
 
 clean:
-	rm -f test_storage
+	rm -f test_storage test_wal_recovery
 	rm -f *.o
 	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log
 	rm -rf *.dSYM
