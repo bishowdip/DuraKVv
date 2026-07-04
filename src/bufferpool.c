@@ -198,3 +198,40 @@ void bp_unpin(BufferPool *bp, uint64_t page_id, int dirty)
     }
     pthread_mutex_unlock(&bp->mtx);
 }
+
+/* Write every dirty frame to disk (used at checkpoint/close). */
+void bp_flush_all(BufferPool *bp)
+{
+    pthread_mutex_lock(&bp->mtx);
+    for (size_t i = 0; i < bp->nframes; i++)
+        writeback(bp, &bp->frames[i]);
+    pthread_mutex_unlock(&bp->mtx);
+}
+
+/* Snapshot the counters. The parameter is const for callers, but we must cast
+ * it away to take the mutex (locking mutates the lock) -- reading shared stats
+ * without the lock would be a data race. */
+BPStats bp_stats(const BufferPool *bp)
+{
+    BufferPool *m = (BufferPool *)bp;
+    pthread_mutex_lock(&m->mtx);
+    BPStats s = bp->st;
+    pthread_mutex_unlock(&m->mtx);
+    return s;
+}
+
+double bp_hit_ratio(const BufferPool *bp)
+{
+    BPStats s = bp_stats(bp);
+    return s.accesses ? (double)s.hits / (double)s.accesses : 0.0;
+}
+
+void bp_reset_stats(BufferPool *bp)
+{
+    pthread_mutex_lock(&bp->mtx);
+    memset(&bp->st, 0, sizeof(bp->st));
+    pthread_mutex_unlock(&bp->mtx);
+}
+
+const char *bp_policy_name(const BufferPool *bp) { return replacer_name(bp->repl); }
+size_t      bp_nframes(const BufferPool *bp)     { return bp->nframes; }
