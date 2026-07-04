@@ -5,7 +5,7 @@ CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -g -Iinclude
 
 CORE    := src/storage.c src/wal.c src/recovery.c
 
-.PHONY: all tests test clean
+.PHONY: all tests test crashtest clean
 
 all: durakv tests
 
@@ -25,8 +25,12 @@ test: tests
 	@echo "== test_storage =="      && ./test_storage
 	@echo "== test_wal_recovery ==" && ./test_wal_recovery
 
+crashtest: durakv
+	./scripts/crashtest.sh
+
 clean:
 	rm -f durakv test_storage test_wal_recovery
 	rm -f *.o
 	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log
+	rm -f /tmp/durakv_crash.out /tmp/durakv_crash.acked /tmp/durakv_recovery.db.snap
 	rm -rf *.dSYM
