@@ -1,7 +1,7 @@
 /*
- * storage.c -- the storage engine: the durable core the whole system will be
- * built on. It owns the on-disk page file and turns it into a key/value
- * store. Two cooperating pieces live here:
+ * storage.c -- the storage engine: the durable core that ties the system
+ * together. It owns the on-disk page file and turns it into a transactional
+ * key/value store. Four cooperating pieces live here:
  *
  *  1. SLOTTED PAGES. The file is an array of fixed-size pages. Each page has a
  *     header, a slot directory growing downward from the top, and variable-
@@ -12,6 +12,14 @@
  *  2. KEY DIRECTORY. An in-memory chained-hash map from key -> (page_id, slot)
  *     for O(1) average lookup. It is not persisted; it is rebuilt by scanning
  *     the pages at open, so it can never disagree with disk.
+ *
+ *  3. TRANSACTIONS. Every mutation is wrapped as BEGIN/UPDATE.../COMMIT in the
+ *     WAL and made durable BEFORE the data pages are touched (see commit_mods),
+ *     giving atomicity and durability -- the point that makes DuraKV crash-safe.
+ *
+ *  4. CACHING. The live read/write path flows through the write-back buffer
+ *     pool; page_read/page_write are the single choke point where encryption
+ *     at rest is (later) applied.
  *
  * See include/storage.h for the public contract and on-disk structures.
  */
@@ -258,6 +266,28 @@ static uint64_t find_page(DB *db, uint16_t need)
 }
 
 /* ====================================================================== */
+/* Cached page access (live path goes through the buffer pool)            */
+/* ====================================================================== */
+
+/* Read a page's current contents through the buffer pool. Recovery and the
+ * post-open index rebuild run before db->bp exists and use page_read directly. */
+static void cached_read(DB *db, uint64_t page_id, uint8_t *dst)
+{
+    uint8_t *frame = bp_pin(db->bp, page_id);
+    memcpy(dst, frame, PAGE_SIZE);
+    bp_unpin(db->bp, page_id, 0);
+}
+
+/* Install a page's new contents into the pool and mark the frame dirty. The
+ * page is flushed to data.db lazily (on eviction / checkpoint / close). */
+static void cached_write(DB *db, uint64_t page_id, const uint8_t *src)
+{
+    uint8_t *frame = bp_pin(db->bp, page_id);
+    memcpy(frame, src, PAGE_SIZE);
+    bp_unpin(db->bp, page_id, 1);
+}
+
+/* ====================================================================== */
 /* Transactional commit                                                   */
 /* ====================================================================== */
 
@@ -289,9 +319,12 @@ static int commit_mods(DB *db, Mod *mods, int nmods)
 
     wal_fsync(db);               /* <-- the commit is durable here */
 
-    /* now (and only now, post-fsync) write the after-images to data.db */
+    /* Now (and only now, post-fsync) install the after-images into the buffer
+     * pool. They become dirty frames flushed lazily; data.db is fsync'd only at
+     * checkpoint/close. A crash that loses these unsynced pages is repaired by
+     * redo, because the WAL holding their after-images is already durable. */
     for (int i = 0; i < nmods; i++) {
-        page_write(db, mods[i].page_id, mods[i].after);
+        cached_write(db, mods[i].page_id, mods[i].after);
         page_free_ensure(db, mods[i].page_id);
         db->page_free[mods[i].page_id] = page_free_space(mods[i].after);
     }
@@ -333,7 +366,7 @@ int db_set(DB *db, const char *key, const void *val, uint32_t vlen)
         /* update in place: tombstone + insert on the same page */
         Mod *m = &mods[nmods++];
         m->page_id = old->page_id;
-        page_read(db, m->page_id, m->before);
+        cached_read(db, m->page_id, m->before);
         memcpy(m->after, m->before, PAGE_SIZE);
         page_tombstone(m->after, old->slot);
         if (page_insert(m->after, rec, reclen, &new_slot) != 0) return DK_IO;
@@ -343,14 +376,14 @@ int db_set(DB *db, const char *key, const void *val, uint32_t vlen)
             /* tombstone the old record on its page */
             Mod *m = &mods[nmods++];
             m->page_id = old->page_id;
-            page_read(db, m->page_id, m->before);
+            cached_read(db, m->page_id, m->before);
             memcpy(m->after, m->before, PAGE_SIZE);
             page_tombstone(m->after, old->slot);
         }
         new_page = find_page(db, need);
         Mod *m = &mods[nmods++];
         m->page_id = new_page;
-        page_read(db, m->page_id, m->before);
+        cached_read(db, m->page_id, m->before);
         memcpy(m->after, m->before, PAGE_SIZE);
         if (page_insert(m->after, rec, reclen, &new_slot) != 0) return DK_IO;
     }
@@ -369,7 +402,7 @@ int db_get(DB *db, const char *key, void *valbuf, uint32_t buflen,
     if (!e) return DK_NOTFOUND;
 
     uint8_t page[PAGE_SIZE];
-    page_read(db, e->page_id, page);
+    cached_read(db, e->page_id, page);
     uint16_t rlen;
     const uint8_t *rec = page_slot_ptr(page, e->slot, &rlen);
     if (!rec) return DK_NOTFOUND;
@@ -389,7 +422,7 @@ int db_del(DB *db, const char *key)
 
     Mod m;
     m.page_id = old->page_id;
-    page_read(db, m.page_id, m.before);
+    cached_read(db, m.page_id, m.before);
     memcpy(m.after, m.before, PAGE_SIZE);
     page_tombstone(m.after, old->slot);
 
