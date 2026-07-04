@@ -18,6 +18,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "storage.h"
 #include "wal.h"
+#include "recovery.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -449,7 +450,10 @@ DB *db_open(const char *data_path, const char *wal_path)
     db->next_lsn = 1;
     db->next_txn = 1;
 
-    rebuild_index(db);           /* directory reflects the on-disk pages */
+    /* ORDER MATTERS: recover first so the pages are correct, THEN build the
+     * directory from those recovered pages. */
+    recovery_run(db);            /* analysis / redo / undo over the WAL */
+    rebuild_index(db);           /* directory reflects the recovered pages */
     return db;
 }
 
