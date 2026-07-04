@@ -80,3 +80,47 @@ void bp_destroy(BufferPool *bp)
     free(bp->frames);
     free(bp);
 }
+
+/* Read a page from disk into a frame; pages past EOF come back empty/valid.
+ * If a custom I/O callback is installed (the storage engine's encryption-aware
+ * path), use it; otherwise read the raw page directly. */
+static void load_from_disk(BufferPool *bp, uint64_t page_id, uint8_t *dst)
+{
+    if (bp->io_read) { bp->io_read(bp->io_ctx, page_id, dst); return; }
+    ssize_t n = pread(bp->fd, dst, PAGE_SIZE, (off_t)page_id * PAGE_SIZE);
+    if (n < (ssize_t)PAGE_SIZE) page_init(dst, page_id);
+}
+
+/* Flush one frame to disk if (and only if) it holds unsaved changes. Clearing
+ * the dirty bit afterwards makes repeated flushes cheap and idempotent. */
+static void writeback(BufferPool *bp, Frame *f)
+{
+    if (!f->valid || !f->dirty) return;
+    if (bp->io_write) {
+        bp->io_write(bp->io_ctx, f->page_id, f->data);
+    } else {
+        ssize_t n = pwrite(bp->fd, f->data, PAGE_SIZE, (off_t)f->page_id * PAGE_SIZE);
+        if (n != (ssize_t)PAGE_SIZE) perror("bufferpool writeback");
+    }
+    f->dirty = 0;
+    bp->st.writebacks++;
+}
+
+/* Install the encryption-aware page I/O callbacks (the single choke point that
+ * keeps sealing/unsealing out of the pool and the storage engine). */
+void bp_set_io(BufferPool *bp, void *ctx, bp_read_fn rd, bp_write_fn wr)
+{
+    bp->io_ctx = ctx; bp->io_read = rd; bp->io_write = wr;
+}
+
+/* Linear scan for a resident copy of `page_id`. O(nframes); fine for the small
+ * pools used here. A production system would index this with a hash map. */
+static Frame *find_resident(BufferPool *bp, uint64_t page_id, size_t *idx)
+{
+    for (size_t i = 0; i < bp->nframes; i++)
+        if (bp->frames[i].valid && bp->frames[i].page_id == page_id) {
+            if (idx) *idx = i;
+            return &bp->frames[i];
+        }
+    return NULL;
+}
