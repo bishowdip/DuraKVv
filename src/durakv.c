@@ -8,6 +8,10 @@
  * Raw commands (one per line): set <k> <v...> | get <k> | del <k> | list |
  * checkpoint | quit. Piped/scripted input is driven through this parser, so
  * crashtest.sh and the demos behave predictably.
+ *
+ * In stress mode each committed key is printed as "COMMIT <key>" and flushed
+ * *after* its WAL fsync, so anything the harness sees on stdout is guaranteed
+ * durable -- exactly the contract crashtest.sh relies on.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "storage.h"
@@ -16,6 +20,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/* Commit `count` keys starting at `start`. Each committed key is announced on
+ * stdout only after db_set has fsync'd its WAL, so the crashtest can trust that
+ * every "COMMIT" line it reads is already durable. */
+static void run_stress(DB *db, long count, long start)
+{
+    char key[64], val[64];
+    for (long i = start; i < start + count; i++) {
+        snprintf(key, sizeof(key), "key%ld", i);
+        snprintf(val, sizeof(val), "val%ld", i);
+        if (db_set(db, key, val, (uint32_t)strlen(val)) == DK_OK) {
+            printf("COMMIT %s\n", key);
+            fflush(stdout);
+        }
+    }
+}
 
 /* Raw line-command interpreter for piped/scripted input (set/get/del/list/
  * checkpoint/quit), one command per line. Kept deliberately simple and stable
@@ -67,14 +87,20 @@ static void run_interactive(DB *db)
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <data.db> <wal.log>\n", argv[0]);
+        fprintf(stderr, "usage: %s <data.db> <wal.log> [stress N START]\n", argv[0]);
         return 2;
     }
 
     DB *db = db_open(argv[1], argv[2]);
     if (!db) { fprintf(stderr, "failed to open store\n"); return 1; }
 
-    run_interactive(db);         /* raw line commands for pipes/scripts */
+    if (argc >= 5 && strcmp(argv[3], "stress") == 0) {
+        long count = strtol(argv[4], NULL, 10);
+        long start = argc >= 6 ? strtol(argv[5], NULL, 10) : 0;
+        run_stress(db, count, start);
+    } else {
+        run_interactive(db);     /* raw line commands for pipes/scripts */
+    }
 
     db_close(db);
     return 0;
