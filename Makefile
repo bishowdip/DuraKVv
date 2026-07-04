@@ -7,7 +7,10 @@ CORE    := src/storage.c src/wal.c src/recovery.c
 
 .PHONY: all tests test clean
 
-all: tests
+all: durakv tests
+
+durakv: $(CORE) src/durakv.c
+	$(CC) $(CFLAGS) -o $@ $^
 
 # --- unit tests ----------------------------------------------------------
 tests: test_storage test_wal_recovery
@@ -23,7 +26,7 @@ test: tests
 	@echo "== test_wal_recovery ==" && ./test_wal_recovery
 
 clean:
-	rm -f test_storage test_wal_recovery
+	rm -f durakv test_storage test_wal_recovery
 	rm -f *.o
 	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log
 	rm -rf *.dSYM
