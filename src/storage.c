@@ -388,6 +388,16 @@ int db_del(DB *db, const char *key)
     return DK_OK;
 }
 
+/* Force a consistent, fully-durable state and mark it in the WAL. After a
+ * checkpoint, recovery need not replay anything before it -- which is what
+ * bounds recovery time and lets the WAL be trimmed. */
+void db_checkpoint(DB *db)
+{
+    fsync(db->data_fd);          /* all data pages now durable   */
+    wal_append(db, WAL_CHECKPOINT, 0, 0, db->page_count, NULL, 0, NULL, 0);
+    wal_fsync(db);
+}
+
 /* ====================================================================== */
 /* Open / rebuild / close                                                 */
 /* ====================================================================== */

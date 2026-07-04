@@ -93,6 +93,8 @@ int  db_get(DB *db, const char *key, void *valbuf, uint32_t buflen,
             uint32_t *vlen_out);
 int  db_del(DB *db, const char *key);
 
+void db_checkpoint(DB *db);     /* fsync data + write a CHECKPOINT marker */
+
 /* ---- page-level helpers ------------------------------------------------- */
 
 void        page_init(uint8_t *page, uint64_t page_id);
