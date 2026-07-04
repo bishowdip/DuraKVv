@@ -1,25 +1,28 @@
-# DuraKV -- Phase 1 (storage engine). No external dependencies yet.
+# DuraKV -- durable storage engine + in-RAM buffer pool. Only dependency so
+# far is pthreads (in libc), used by the buffer pool.
 
 CC      ?= cc
-CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -g -Iinclude
+CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -g -Iinclude -pthread
+LDFLAGS ?= -pthread
 
-CORE    := src/storage.c src/wal.c src/recovery.c
+CORE    := src/storage.c src/wal.c src/recovery.c \
+           src/bufferpool.c src/replacement.c
 
 .PHONY: all tests test crashtest clean
 
 all: durakv tests
 
 durakv: $(CORE) src/durakv.c
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # --- unit tests ----------------------------------------------------------
 tests: test_storage test_wal_recovery
 
 test_storage: $(CORE) tests/test_storage.c
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 test_wal_recovery: $(CORE) tests/test_wal_recovery.c
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 test: tests
 	@echo "== test_storage =="      && ./test_storage
