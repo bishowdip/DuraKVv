@@ -78,6 +78,18 @@ int recovery_run(DB *db)
         }
     }
 
+    /* ---- Undo: roll back losers in reverse, restoring before-images ---- */
+    for (size_t i = n; i-- > start; ) {
+        WalRecord *r = &recs[i];
+        if (r->type != WAL_UPDATE) continue;
+        if (committed(commit_set, ncommit, r->txn_id)) continue;
+        if (r->page_id >= db->page_count) continue;   /* never materialised */
+        if (r->before_len != PAGE_SIZE) continue;
+        page_read(db, r->page_id, page);
+        memcpy(page, r->before, PAGE_SIZE);
+        page_write(db, r->page_id, page);
+    }
+
     fsync(db->data_fd);          /* recovered state is now durable */
 
     db->next_lsn = max_lsn + 1;
