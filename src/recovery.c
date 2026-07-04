@@ -60,6 +60,24 @@ int recovery_run(DB *db)
             commit_set[ncommit++] = recs[i].txn_id;
     }
 
+    uint8_t page[PAGE_SIZE];
+
+    /* ---- Redo: re-apply committed after-images, idempotently ----------- */
+    for (size_t i = start; i < n; i++) {
+        WalRecord *r = &recs[i];
+        if (r->type != WAL_UPDATE) continue;
+        if (!committed(commit_set, ncommit, r->txn_id)) continue;
+        if (r->after_len != PAGE_SIZE) continue;
+        page_read(db, r->page_id, page);
+        /* Idempotency check: only apply if the page has not already absorbed
+         * this change. Skipping when page_lsn >= r->lsn is what lets recovery
+         * be re-run any number of times without corrupting data. */
+        if (page_get_lsn(page) < r->lsn) {
+            memcpy(page, r->after, PAGE_SIZE);
+            page_write(db, r->page_id, page);
+        }
+    }
+
     fsync(db->data_fd);          /* recovered state is now durable */
 
     db->next_lsn = max_lsn + 1;
