@@ -15,6 +15,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "storage.h"
+#include "bufferpool.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -106,7 +107,7 @@ static int ask(const char *prompt, char *buf, size_t cap)
     return 1;
 }
 
-static void menu_banner(void)
+static void menu_banner(DB *db)
 {
     printf("\n" C_CYAN C_BOLD
            "  ____                  _  ____   __\n"
@@ -114,7 +115,9 @@ static void menu_banner(void)
            " | | | | | | | '__/ _` | ' /  \\ V / \n"
            " | |_| | |_| | | | (_| | . \\   | |  \n"
            " |____/ \\__,_|_|  \\__,_|_|\\_\\  |_|  \n" C_RESET);
-    printf(C_DIM "  crash-safe key/value store" C_RESET "\n");
+    printf(C_DIM "  crash-safe key/value store" C_RESET
+           "   [policy=%s, frames=%zu]\n",
+           bp_policy_name(db->bp), bp_nframes(db->bp));
 }
 
 static void menu_show(void)
@@ -133,7 +136,7 @@ static void run_menu(DB *db)
     char choice[64], key[1024];
     static char val[1 << 20];
 
-    menu_banner();
+    menu_banner(db);
 
     for (;;) {
         menu_show();
@@ -195,11 +198,20 @@ static void run_menu(DB *db)
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <data.db> <wal.log> [stress N START]\n", argv[0]);
+        fprintf(stderr,
+            "usage: %s <data.db> <wal.log> [stress N START]\n"
+            "  env: DURAKV_FRAMES=<n>  DURAKV_POLICY=fifo|lru\n", argv[0]);
         return 2;
     }
 
-    DB *db = db_open(argv[1], argv[2]);
+    /* buffer pool is configurable via env: DURAKV_FRAMES, DURAKV_POLICY */
+    const char *fenv = getenv("DURAKV_FRAMES");
+    const char *penv = getenv("DURAKV_POLICY");
+    size_t frames = fenv ? (size_t)strtoul(fenv, NULL, 10) : 64;
+    if (frames == 0) frames = 64;
+    PolicyKind policy = (penv && strcmp(penv, "fifo") == 0) ? POLICY_FIFO : POLICY_LRU;
+
+    DB *db = db_open_ex(argv[1], argv[2], frames, policy);
     if (!db) { fprintf(stderr, "failed to open store\n"); return 1; }
 
     /* Three modes: batch stress (for the crashtest), a guided menu for a human
