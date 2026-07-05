@@ -1,25 +1,39 @@
-# DuraKV -- Phase 1 (storage engine). No external dependencies yet.
+# DuraKV -- durable storage engine + in-RAM buffer pool. Only dependency so
+# far is pthreads (in libc), used by the buffer pool.
 
 CC      ?= cc
-CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -g -Iinclude
+CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -g -Iinclude -pthread
+LDFLAGS ?= -pthread
 
-CORE    := src/storage.c src/wal.c
+CORE    := src/storage.c src/wal.c src/recovery.c \
+           src/bufferpool.c src/replacement.c
 
-.PHONY: all tests test clean
+.PHONY: all tests test crashtest clean
 
-all: tests
+all: durakv tests
+
+durakv: $(CORE) src/durakv.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # --- unit tests ----------------------------------------------------------
-tests: test_storage
+tests: test_storage test_wal_recovery
 
 test_storage: $(CORE) tests/test_storage.c
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_wal_recovery: $(CORE) tests/test_wal_recovery.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 test: tests
-	@echo "== test_storage ==" && ./test_storage
+	@echo "== test_storage =="      && ./test_storage
+	@echo "== test_wal_recovery ==" && ./test_wal_recovery
+
+crashtest: durakv
+	./scripts/crashtest.sh
 
 clean:
-	rm -f test_storage
+	rm -f durakv test_storage test_wal_recovery
 	rm -f *.o
 	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log
+	rm -f /tmp/durakv_crash.out /tmp/durakv_crash.acked /tmp/durakv_recovery.db.snap
 	rm -rf *.dSYM

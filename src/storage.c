@@ -1,7 +1,7 @@
 /*
- * storage.c -- the storage engine: the durable core the whole system will be
- * built on. It owns the on-disk page file and turns it into a key/value
- * store. Two cooperating pieces live here:
+ * storage.c -- the storage engine: the durable core that ties the system
+ * together. It owns the on-disk page file and turns it into a transactional
+ * key/value store. Four cooperating pieces live here:
  *
  *  1. SLOTTED PAGES. The file is an array of fixed-size pages. Each page has a
  *     header, a slot directory growing downward from the top, and variable-
@@ -13,11 +13,21 @@
  *     for O(1) average lookup. It is not persisted; it is rebuilt by scanning
  *     the pages at open, so it can never disagree with disk.
  *
+ *  3. TRANSACTIONS. Every mutation is wrapped as BEGIN/UPDATE.../COMMIT in the
+ *     WAL and made durable BEFORE the data pages are touched (see commit_mods),
+ *     giving atomicity and durability -- the point that makes DuraKV crash-safe.
+ *
+ *  4. CACHING. The live read/write path flows through the write-back buffer
+ *     pool; page_read/page_write are the single choke point where encryption
+ *     at rest is (later) applied.
+ *
  * See include/storage.h for the public contract and on-disk structures.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "storage.h"
 #include "wal.h"
+#include "recovery.h"
+#include "bufferpool.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -143,6 +153,17 @@ int page_write(DB *db, uint64_t page_id, const uint8_t *buf)
     return DK_OK;
 }
 
+/* Buffer-pool I/O callbacks: every cached read/write flows through page_read /
+ * page_write, the single place that (later) applies encryption at rest. */
+static int bp_io_read(void *ctx, uint64_t page_id, uint8_t *out)
+{
+    return page_read((DB *)ctx, page_id, out);
+}
+static int bp_io_write(void *ctx, uint64_t page_id, const uint8_t *in)
+{
+    return page_write((DB *)ctx, page_id, in);
+}
+
 /* ====================================================================== */
 /* Key directory (chained hash map)                                       */
 /* ====================================================================== */
@@ -245,6 +266,28 @@ static uint64_t find_page(DB *db, uint16_t need)
 }
 
 /* ====================================================================== */
+/* Cached page access (live path goes through the buffer pool)            */
+/* ====================================================================== */
+
+/* Read a page's current contents through the buffer pool. Recovery and the
+ * post-open index rebuild run before db->bp exists and use page_read directly. */
+static void cached_read(DB *db, uint64_t page_id, uint8_t *dst)
+{
+    uint8_t *frame = bp_pin(db->bp, page_id);
+    memcpy(dst, frame, PAGE_SIZE);
+    bp_unpin(db->bp, page_id, 0);
+}
+
+/* Install a page's new contents into the pool and mark the frame dirty. The
+ * page is flushed to data.db lazily (on eviction / checkpoint / close). */
+static void cached_write(DB *db, uint64_t page_id, const uint8_t *src)
+{
+    uint8_t *frame = bp_pin(db->bp, page_id);
+    memcpy(frame, src, PAGE_SIZE);
+    bp_unpin(db->bp, page_id, 1);
+}
+
+/* ====================================================================== */
 /* Transactional commit                                                   */
 /* ====================================================================== */
 
@@ -276,9 +319,12 @@ static int commit_mods(DB *db, Mod *mods, int nmods)
 
     wal_fsync(db);               /* <-- the commit is durable here */
 
-    /* now (and only now, post-fsync) write the after-images to data.db */
+    /* Now (and only now, post-fsync) install the after-images into the buffer
+     * pool. They become dirty frames flushed lazily; data.db is fsync'd only at
+     * checkpoint/close. A crash that loses these unsynced pages is repaired by
+     * redo, because the WAL holding their after-images is already durable. */
     for (int i = 0; i < nmods; i++) {
-        page_write(db, mods[i].page_id, mods[i].after);
+        cached_write(db, mods[i].page_id, mods[i].after);
         page_free_ensure(db, mods[i].page_id);
         db->page_free[mods[i].page_id] = page_free_space(mods[i].after);
     }
@@ -320,7 +366,7 @@ int db_set(DB *db, const char *key, const void *val, uint32_t vlen)
         /* update in place: tombstone + insert on the same page */
         Mod *m = &mods[nmods++];
         m->page_id = old->page_id;
-        page_read(db, m->page_id, m->before);
+        cached_read(db, m->page_id, m->before);
         memcpy(m->after, m->before, PAGE_SIZE);
         page_tombstone(m->after, old->slot);
         if (page_insert(m->after, rec, reclen, &new_slot) != 0) return DK_IO;
@@ -330,14 +376,14 @@ int db_set(DB *db, const char *key, const void *val, uint32_t vlen)
             /* tombstone the old record on its page */
             Mod *m = &mods[nmods++];
             m->page_id = old->page_id;
-            page_read(db, m->page_id, m->before);
+            cached_read(db, m->page_id, m->before);
             memcpy(m->after, m->before, PAGE_SIZE);
             page_tombstone(m->after, old->slot);
         }
         new_page = find_page(db, need);
         Mod *m = &mods[nmods++];
         m->page_id = new_page;
-        page_read(db, m->page_id, m->before);
+        cached_read(db, m->page_id, m->before);
         memcpy(m->after, m->before, PAGE_SIZE);
         if (page_insert(m->after, rec, reclen, &new_slot) != 0) return DK_IO;
     }
@@ -356,7 +402,7 @@ int db_get(DB *db, const char *key, void *valbuf, uint32_t buflen,
     if (!e) return DK_NOTFOUND;
 
     uint8_t page[PAGE_SIZE];
-    page_read(db, e->page_id, page);
+    cached_read(db, e->page_id, page);
     uint16_t rlen;
     const uint8_t *rec = page_slot_ptr(page, e->slot, &rlen);
     if (!rec) return DK_NOTFOUND;
@@ -376,7 +422,7 @@ int db_del(DB *db, const char *key)
 
     Mod m;
     m.page_id = old->page_id;
-    page_read(db, m.page_id, m.before);
+    cached_read(db, m.page_id, m.before);
     memcpy(m.after, m.before, PAGE_SIZE);
     page_tombstone(m.after, old->slot);
 
@@ -385,6 +431,17 @@ int db_del(DB *db, const char *key)
 
     dir_del(&db->dir, key);
     return DK_OK;
+}
+
+/* Force a consistent, fully-durable state and mark it in the WAL. After a
+ * checkpoint, recovery need not replay anything before it -- which is what
+ * bounds recovery time and lets the WAL be trimmed. */
+void db_checkpoint(DB *db)
+{
+    bp_flush_all(db->bp);        /* push dirty frames to data.db */
+    fsync(db->data_fd);          /* all data pages now durable   */
+    wal_append(db, WAL_CHECKPOINT, 0, 0, db->page_count, NULL, 0, NULL, 0);
+    wal_fsync(db);
 }
 
 /* ====================================================================== */
@@ -418,6 +475,12 @@ static void rebuild_index(DB *db)
 
 DB *db_open(const char *data_path, const char *wal_path)
 {
+    return db_open_ex(data_path, wal_path, 64, POLICY_LRU);
+}
+
+DB *db_open_ex(const char *data_path, const char *wal_path,
+               size_t nframes, PolicyKind policy)
+{
     DB *db = calloc(1, sizeof(*db));
     if (!db) return NULL;
 
@@ -449,15 +512,27 @@ DB *db_open(const char *data_path, const char *wal_path)
     db->next_lsn = 1;
     db->next_txn = 1;
 
-    rebuild_index(db);           /* directory reflects the on-disk pages */
+    /* ORDER MATTERS: recover first so the pages are correct, THEN build the
+     * directory from those recovered pages, THEN start caching. Doing recovery
+     * before the pool exists also guarantees the pool starts cold. */
+    recovery_run(db);            /* analysis / redo / undo (direct page I/O) */
+    rebuild_index(db);           /* directory reflects the recovered pages   */
+
+    /* the buffer pool is created last: recovery and rebuild use direct page
+     * I/O, so the pool starts cold and every later access flows through it.
+     * Route its I/O through page_read/page_write (the encryption choke point). */
+    db->bp = bp_create(db->data_fd, nframes, policy);
+    bp_set_io(db->bp, db, bp_io_read, bp_io_write);
     return db;
 }
 
 void db_close(DB *db)
 {
     if (!db) return;
+    bp_flush_all(db->bp);        /* dirty frames -> data.db */
     fsync(db->data_fd);
     fsync(db->wal_fd);
+    bp_destroy(db->bp);
     dir_free(&db->dir);
     free(db->page_free);
     close(db->data_fd);

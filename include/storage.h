@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "replacement.h"        /* PolicyKind */
 
 #ifndef PAGE_SIZE
 #define PAGE_SIZE 4096          /* logical page size (configurable at compile time) */
@@ -60,6 +61,8 @@ typedef struct {
 
 /* ---- the database handle ----------------------------------------------- */
 
+struct BufferPool;              /* defined in bufferpool.h                   */
+
 typedef struct DB {
     int       data_fd;          /* data.db                                   */
     int       wal_fd;           /* wal.log (O_APPEND for writes)             */
@@ -69,6 +72,7 @@ typedef struct DB {
     Dir       dir;              /* key -> location index                     */
     uint16_t *page_free;        /* free bytes per page (index by page id)    */
     size_t    page_free_cap;    /* capacity of page_free[]                   */
+    struct BufferPool *bp;      /* page cache (NULL during recovery)         */
 } DB;
 
 /* ---- return codes ------------------------------------------------------ */
@@ -82,8 +86,11 @@ enum {
 
 /* ---- public key/value API ---------------------------------------------- */
 
-/* Open (or create) the store and its write-ahead log, and return a handle. */
+/* Open (or create) the store and its write-ahead log, and return a handle.
+ * db_open uses sensible defaults; db_open_ex configures the buffer pool. */
 DB  *db_open(const char *data_path, const char *wal_path);
+DB  *db_open_ex(const char *data_path, const char *wal_path,
+                size_t nframes, PolicyKind policy);
 void db_close(DB *db);
 
 int  db_set(DB *db, const char *key, const void *val, uint32_t vlen);
@@ -92,6 +99,8 @@ int  db_set(DB *db, const char *key, const void *val, uint32_t vlen);
 int  db_get(DB *db, const char *key, void *valbuf, uint32_t buflen,
             uint32_t *vlen_out);
 int  db_del(DB *db, const char *key);
+
+void db_checkpoint(DB *db);     /* fsync data + write a CHECKPOINT marker */
 
 /* ---- page-level helpers ------------------------------------------------- */
 
