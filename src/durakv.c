@@ -76,6 +76,16 @@ static void run_interactive(DB *db)
         } else if (strcmp(cmd, "checkpoint") == 0) {
             db_checkpoint(db);
             printf("OK\n");
+        } else if (strcmp(cmd, "stats") == 0) {
+            BPStats s = bp_stats(db->bp);
+            printf("policy=%s frames=%zu pages=%llu\n",
+                   bp_policy_name(db->bp), bp_nframes(db->bp),
+                   (unsigned long long)db->page_count);
+            printf("accesses=%llu hits=%llu faults=%llu "
+                   "evictions=%llu writebacks=%llu hit_ratio=%.1f%%\n",
+                   (unsigned long long)s.accesses, (unsigned long long)s.hits,
+                   (unsigned long long)s.faults,   (unsigned long long)s.evictions,
+                   (unsigned long long)s.writebacks, 100.0 * bp_hit_ratio(db->bp));
         } else if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0) {
             break;
         } else {
@@ -126,9 +136,10 @@ static void menu_show(void)
     printf("    " C_GREEN "1" C_RESET ") Set a value      "
            "    " C_GREEN "4" C_RESET ") List all keys\n");
     printf("    " C_GREEN "2" C_RESET ") Get a value      "
-           "    " C_GREEN "5" C_RESET ") Save to disk (checkpoint)\n");
+           "    " C_GREEN "5" C_RESET ") Show stats\n");
     printf("    " C_GREEN "3" C_RESET ") Delete a key     "
-           "    " C_GREEN "0" C_RESET ") Quit\n");
+           "    " C_GREEN "6" C_RESET ") Save to disk (checkpoint)\n");
+    printf("    " C_GREEN "0" C_RESET ") Quit\n");
 }
 
 static void run_menu(DB *db)
@@ -140,7 +151,7 @@ static void run_menu(DB *db)
 
     for (;;) {
         menu_show();
-        if (!ask("\n  choose [0-5]: ", choice, sizeof(choice))) { printf("\n"); break; }
+        if (!ask("\n  choose [0-6]: ", choice, sizeof(choice))) { printf("\n"); break; }
         if (choice[0] == '\0') continue;
 
         if (!strcmp(choice, "1")) {
@@ -183,6 +194,16 @@ static void run_menu(DB *db)
             else            printf(C_DIM "    %zu key(s) total\n" C_RESET, count);
 
         } else if (!strcmp(choice, "5")) {
+            BPStats s = bp_stats(db->bp);
+            printf("    buffer pool : %s, %zu frames, %llu pages on disk\n",
+                   bp_policy_name(db->bp), bp_nframes(db->bp),
+                   (unsigned long long)db->page_count);
+            printf("    accesses=%llu  hits=%llu  faults=%llu  "
+                   "hit ratio=" C_BOLD "%.1f%%" C_RESET "\n",
+                   (unsigned long long)s.accesses, (unsigned long long)s.hits,
+                   (unsigned long long)s.faults, 100.0 * bp_hit_ratio(db->bp));
+
+        } else if (!strcmp(choice, "6")) {
             db_checkpoint(db);
             printf(C_GREEN "    \xE2\x9C\x93 all data flushed safely to disk\n" C_RESET);
 
@@ -190,7 +211,7 @@ static void run_menu(DB *db)
             printf(C_CYAN "  goodbye \xE2\x80\x94 your data is saved.\n" C_RESET);
             break;
         } else {
-            printf(C_RED "    please choose a number from 0 to 5\n" C_RESET);
+            printf(C_RED "    please choose a number from 0 to 6\n" C_RESET);
         }
     }
 }
