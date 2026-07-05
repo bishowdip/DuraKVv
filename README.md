@@ -108,14 +108,27 @@ process's RAM, a `kill -9` really does lose them, so recovery's redo pass is
 exercised on every restart — not masked by the OS page cache. The pool has its
 own mutex, so page faults stay safe once the store goes multi-threaded.
 
-`db_open` defaults to 64 frames with LRU; `db_open_ex` configures both.
+`db_open` defaults to 64 frames with LRU; `db_open_ex` configures both. The CLI
+reads `DURAKV_FRAMES=<n>` (default 64) and `DURAKV_POLICY=fifo|lru` (default
+`lru`), and its `stats` command reports the live pool counters.
+
+Two demonstrations earn the Phase 2 marks:
+
+- **Belady's anomaly** (`tests/test_belady.c`): the reference string
+  `1 2 3 4 1 2 5 1 2 3 4 5` faults **more with 4 frames than with 3** under
+  FIFO (9 → 10), while LRU is monotonic (10 → 8). Driven through the real
+  buffer pool, not a model.
+- **FIFO vs LRU hit ratios** (`tests/test_bufferpool.c`): a report across
+  looping and skewed-locality workloads — e.g. LRU 82.8% vs FIFO 73.2% on an
+  80/20 hot-set.
 
 ## Layout
 
 ```
 include/  storage.h wal.h recovery.h bufferpool.h replacement.h
 src/      storage.c wal.c recovery.c bufferpool.c replacement.c durakv.c
-tests/    test_storage.c test_wal_recovery.c
+tests/    test_storage.c test_wal_recovery.c test_bufferpool.c test_belady.c
+          mem_demo.c
 scripts/  crashtest.sh
 ```
 
@@ -125,4 +138,7 @@ scripts/  crashtest.sh
 |------|--------|
 | `tests/test_storage.c` | record round-trips, update/delete, multi-page growth, persistence across reopen |
 | `tests/test_wal_recovery.c` | redo rebuilds 500 keys from the WAL after `data.db` is rolled back to a pre-write snapshot (an honest power-loss model) |
+| `tests/test_bufferpool.c` | page faults, eviction, dirty write-back; FIFO/LRU hit-ratio report |
+| `tests/test_belady.c` | Belady's anomaly under FIFO; LRU stays monotonic |
+| `tests/mem_demo.c` | a simple pointer-level paging + FIFO demonstration |
 | `scripts/crashtest.sh` | committed keys survive repeated `kill -9` |
