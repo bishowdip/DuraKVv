@@ -16,7 +16,7 @@ durakv: $(CORE) src/durakv.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # --- unit tests ----------------------------------------------------------
-tests: test_storage test_wal_recovery
+tests: test_storage test_wal_recovery mem_demo
 
 test_storage: $(CORE) tests/test_storage.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -24,15 +24,19 @@ test_storage: $(CORE) tests/test_storage.c
 test_wal_recovery: $(CORE) tests/test_wal_recovery.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+mem_demo: tests/mem_demo.c
+	$(CC) $(CFLAGS) -o $@ $^
+
 test: tests
 	@echo "== test_storage =="      && ./test_storage
 	@echo "== test_wal_recovery ==" && ./test_wal_recovery
+	@echo "== mem_demo =="          && ./mem_demo
 
 crashtest: durakv
 	./scripts/crashtest.sh
 
 clean:
-	rm -f durakv test_storage test_wal_recovery
+	rm -f durakv test_storage test_wal_recovery test_bufferpool test_belady mem_demo
 	rm -f *.o
 	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log
 	rm -f /tmp/durakv_crash.out /tmp/durakv_crash.acked /tmp/durakv_recovery.db.snap
