@@ -16,12 +16,15 @@ durakv: $(CORE) src/durakv.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # --- unit tests ----------------------------------------------------------
-tests: test_storage test_wal_recovery mem_demo
+tests: test_storage test_wal_recovery test_bufferpool mem_demo
 
 test_storage: $(CORE) tests/test_storage.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 test_wal_recovery: $(CORE) tests/test_wal_recovery.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_bufferpool: $(CORE) tests/test_bufferpool.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 mem_demo: tests/mem_demo.c
@@ -30,6 +33,7 @@ mem_demo: tests/mem_demo.c
 test: tests
 	@echo "== test_storage =="      && ./test_storage
 	@echo "== test_wal_recovery ==" && ./test_wal_recovery
+	@echo "== test_bufferpool =="   && ./test_bufferpool
 	@echo "== mem_demo =="          && ./mem_demo
 
 crashtest: durakv
