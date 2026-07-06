@@ -20,22 +20,48 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <unistd.h>
 
-/* Commit `count` keys starting at `start`. Each committed key is announced on
- * stdout only after db_set has fsync'd its WAL, so the crashtest can trust that
- * every "COMMIT" line it reads is already durable. */
-static void run_stress(DB *db, long count, long start)
+/* Shared by stress worker threads: a printf lock keeps COMMIT lines whole. */
+static pthread_mutex_t g_print_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct { DB *db; long start, count, threads, tid; } StressArg;
+
+/* One stress worker: commits its stripe of the key range. Each committed key is
+ * announced on stdout only after db_set has fsync'd its WAL, so the crashtest
+ * can trust that every "COMMIT" line it reads is already durable. */
+static void *stress_worker(void *arg)
 {
+    StressArg *a = arg;
     char key[64], val[64];
-    for (long i = start; i < start + count; i++) {
+    for (long i = a->start + a->tid; i < a->start + a->count; i += a->threads) {
         snprintf(key, sizeof(key), "key%ld", i);
         snprintf(val, sizeof(val), "val%ld", i);
-        if (db_set(db, key, val, (uint32_t)strlen(val)) == DK_OK) {
+        if (db_set(a->db, key, val, (uint32_t)strlen(val)) == DK_OK) {
+            /* db_set already fsync'd the WAL, so this COMMIT is durable */
+            pthread_mutex_lock(&g_print_mtx);
             printf("COMMIT %s\n", key);
             fflush(stdout);
+            pthread_mutex_unlock(&g_print_mtx);
         }
     }
+    return NULL;
+}
+
+/* Commit `count` keys starting at `start`, optionally across `threads` worker
+ * threads to exercise the store under concurrent load. */
+static void run_stress(DB *db, long count, long start, long threads)
+{
+    if (threads < 1) threads = 1;
+    StressArg *args = calloc(threads, sizeof(*args));
+    pthread_t *th   = calloc(threads, sizeof(*th));
+    for (long t = 0; t < threads; t++) {
+        args[t] = (StressArg){ db, start, count, threads, t };
+        pthread_create(&th[t], NULL, stress_worker, &args[t]);
+    }
+    for (long t = 0; t < threads; t++) pthread_join(th[t], NULL);
+    free(args); free(th);
 }
 
 /* Raw line-command interpreter for piped/scripted input (set/get/del/list/
@@ -220,7 +246,7 @@ int main(int argc, char **argv)
 {
     if (argc < 3) {
         fprintf(stderr,
-            "usage: %s <data.db> <wal.log> [stress N START]\n"
+            "usage: %s <data.db> <wal.log> [stress N START [THREADS]]\n"
             "  env: DURAKV_FRAMES=<n>  DURAKV_POLICY=fifo|lru\n", argv[0]);
         return 2;
     }
@@ -238,9 +264,10 @@ int main(int argc, char **argv)
     /* Three modes: batch stress (for the crashtest), a guided menu for a human
      * at a terminal, or the raw parser for pipes/scripts. */
     if (argc >= 5 && strcmp(argv[3], "stress") == 0) {
-        long count = strtol(argv[4], NULL, 10);
-        long start = argc >= 6 ? strtol(argv[5], NULL, 10) : 0;
-        run_stress(db, count, start);
+        long count   = strtol(argv[4], NULL, 10);
+        long start   = argc >= 6 ? strtol(argv[5], NULL, 10) : 0;
+        long threads = argc >= 7 ? strtol(argv[6], NULL, 10) : 1;
+        run_stress(db, count, start, threads);
     } else if (isatty(STDIN_FILENO)) {
         run_menu(db);            /* friendly menu for a human at the TTY */
     } else {
