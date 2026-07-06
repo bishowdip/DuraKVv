@@ -122,13 +122,48 @@ Two demonstrations earn the Phase 2 marks:
   looping and skewed-locality workloads — e.g. LRU 82.8% vs FIFO 73.2% on an
   80/20 hot-set.
 
+## Concurrency (Phase 3)
+
+The store is multi-threaded:
+
+- **Thread pool** (`src/threadpool.c`) — N workers over a bounded job queue
+  guarded by one mutex and two condition variables (`not_empty`, `not_full`):
+  the textbook producer–consumer. Every wait loops on its predicate, so
+  spurious wakeups are harmless.
+- **Round-robin scheduler** (`src/scheduler.c`) — per-client queues serviced
+  in rotation, so a heavy client cannot starve the others (real fairness, not
+  a simulation).
+- **Thread-safe store** — a `pthread_rwlock_t` lets `GET` run as a shared
+  reader while `SET`/`DEL` take it exclusively; the buffer pool has its own
+  mutex so concurrent readers can fault pages safely. The lock nesting is
+  always DB rwlock (outer) → buffer-pool mutex (inner), and the whole path is
+  verified race-free under **ThreadSanitizer**.
+- **Deadlock prevention** — the demo shows a strict ascending lock order
+  breaking the Coffman circular-wait condition.
+
+Demos (`make test` runs them):
+
+| Demo | Shows |
+|------|-------|
+| `tests/demo_race.c` | unsynchronised `count++` loses ~140k updates; mutex and C11 `_Atomic` are exact |
+| `tests/demo_deadlock.c` | naive opposite-order locking deadlocks (a watchdog kills it); ascending-order locking completes |
+| `tests/demo_scheduler.c` | round-robin service order — light clients finish without waiting for a heavy client to drain |
+| `tests/loadtest.c` | 16 concurrent clients × 120 ops through the thread pool, every value verified |
+
+Throughput is **fsync-bound**: each commit does a full `F_FULLFSYNC` under the
+write lock, so commits serialise at a few ms each. That is the price of
+durability, paid deliberately. `make crashtest_concurrent` runs the `kill -9`
+loop with 4 writer threads per batch.
+
 ## Layout
 
 ```
 include/  storage.h wal.h recovery.h bufferpool.h replacement.h
-src/      storage.c wal.c recovery.c bufferpool.c replacement.c durakv.c
+          threadpool.h scheduler.h
+src/      storage.c wal.c recovery.c bufferpool.c replacement.c
+          threadpool.c scheduler.c durakv.c
 tests/    test_storage.c test_wal_recovery.c test_bufferpool.c test_belady.c
-          mem_demo.c
+          mem_demo.c demo_race.c demo_deadlock.c demo_scheduler.c loadtest.c
 scripts/  crashtest.sh
 ```
 
@@ -141,4 +176,5 @@ scripts/  crashtest.sh
 | `tests/test_bufferpool.c` | page faults, eviction, dirty write-back; FIFO/LRU hit-ratio report |
 | `tests/test_belady.c` | Belady's anomaly under FIFO; LRU stays monotonic |
 | `tests/mem_demo.c` | a simple pointer-level paging + FIFO demonstration |
-| `scripts/crashtest.sh` | committed keys survive repeated `kill -9` |
+| `tests/demo_*` / `loadtest` | concurrency (see the Phase 3 table above) |
+| `scripts/crashtest.sh` | committed keys survive repeated `kill -9`; `make crashtest_concurrent` does it with 4 writer threads |
