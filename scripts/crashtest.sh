@@ -19,6 +19,7 @@ OUT=/tmp/durakv_crash.out
 ACK=/tmp/durakv_crash.acked
 ITERS="${1:-25}"
 BATCH="${2:-400}"
+THREADS="${3:-1}"     # >1 exercises recovery under concurrent writers
 
 rm -f "$DATA" "$WAL" "$ACK"
 : > "$ACK"
@@ -28,7 +29,7 @@ if [ ! -x ./durakv ]; then echo "build first: make"; exit 2; fi
 start=0
 for ((it=1; it<=ITERS; it++)); do
     : > "$OUT"
-    ./durakv "$DATA" "$WAL" stress "$BATCH" "$start" > "$OUT" 2>/dev/null &
+    ./durakv "$DATA" "$WAL" stress "$BATCH" "$start" "$THREADS" > "$OUT" 2>/dev/null &
     pid=$!
 
     # let it make some progress, then kill at an unpredictable moment

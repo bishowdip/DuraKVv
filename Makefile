@@ -9,7 +9,7 @@ CORE    := src/storage.c src/wal.c src/recovery.c \
            src/bufferpool.c src/replacement.c \
            src/threadpool.c src/scheduler.c
 
-.PHONY: all tests test crashtest clean
+.PHONY: all tests test crashtest crashtest_concurrent clean
 
 all: durakv tests
 
@@ -43,6 +43,9 @@ test: tests
 
 crashtest: durakv
 	./scripts/crashtest.sh
+
+crashtest_concurrent: durakv
+	./scripts/crashtest.sh 12 400 4    # 4 writer threads per batch
 
 clean:
 	rm -f durakv test_storage test_wal_recovery test_bufferpool test_belady mem_demo
