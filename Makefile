@@ -18,7 +18,7 @@ durakv: $(CORE) src/durakv.c
 
 # --- unit tests ----------------------------------------------------------
 tests: test_storage test_wal_recovery test_bufferpool test_belady mem_demo \
-       demo_race
+       demo_race demo_deadlock
 
 test_storage: $(CORE) tests/test_storage.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -39,6 +39,9 @@ mem_demo: tests/mem_demo.c
 demo_race: $(CORE) tests/demo_race.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+demo_deadlock: $(CORE) tests/demo_deadlock.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
 test: tests
 	@echo "== test_storage =="      && ./test_storage
 	@echo "== test_wal_recovery ==" && ./test_wal_recovery
@@ -46,6 +49,7 @@ test: tests
 	@echo "== test_belady =="       && ./test_belady
 	@echo "== mem_demo =="          && ./mem_demo
 	@echo "== demo_race =="         && ./demo_race
+	@echo "== demo_deadlock =="     && ./demo_deadlock
 
 crashtest: durakv
 	./scripts/crashtest.sh
