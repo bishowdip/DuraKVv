@@ -6,7 +6,8 @@ CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -g -Iinclude -pthread
 LDFLAGS ?= -pthread
 
 CORE    := src/storage.c src/wal.c src/recovery.c \
-           src/bufferpool.c src/replacement.c
+           src/bufferpool.c src/replacement.c \
+           src/threadpool.c src/scheduler.c
 
 .PHONY: all tests test crashtest clean
 
