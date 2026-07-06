@@ -112,3 +112,69 @@ ThreadPool *threadpool_create(int nworkers, int queue_cap)
         pthread_create(&tp->workers[i], NULL, worker_main, tp);
     return tp;
 }
+
+/*
+ * Producer side. Enqueue one job, blocking while the buffer is full so a fast
+ * producer cannot outrun the workers and grow memory without bound
+ * (backpressure). Returns 0 on success, or -1 if the pool is shutting down.
+ */
+int threadpool_submit(ThreadPool *tp, job_fn fn, void *arg)
+{
+    pthread_mutex_lock(&tp->mtx);
+    /* Block while full; loop for the same Mesa/spurious-wakeup reason as above. */
+    while (tp->count == tp->cap && !tp->shutdown)
+        pthread_cond_wait(&tp->not_full, &tp->mtx);
+    /* Refuse new work once shutdown has begun (else it could never be joined). */
+    if (tp->shutdown) { pthread_mutex_unlock(&tp->mtx); return -1; }
+
+    tp->queue[tp->tail] = (Job){ fn, arg };
+    tp->tail = (tp->tail + 1) % tp->cap;
+    tp->count++;
+    /* Wake one sleeping worker to consume what we just produced. */
+    pthread_cond_signal(&tp->not_empty);
+    pthread_mutex_unlock(&tp->mtx);
+    return 0;
+}
+
+/*
+ * Graceful shutdown: stop accepting jobs, let the workers finish everything
+ * already queued, then join them and release all resources. Safe to call with
+ * a NULL pool. Must be called from a single thread that owns the pool's
+ * lifetime (typically the one that created it).
+ */
+void threadpool_shutdown(ThreadPool *tp)
+{
+    if (!tp) return;
+    pthread_mutex_lock(&tp->mtx);
+    tp->shutdown = 1;
+    /* broadcast, not signal: EVERY blocked thread must re-evaluate its
+     * predicate now that `shutdown` is set, otherwise idle workers or a
+     * producer stuck on not_full would sleep forever and never be joined. */
+    pthread_cond_broadcast(&tp->not_empty);            /* wake idle workers      */
+    pthread_cond_broadcast(&tp->not_full);             /* wake blocked producers */
+    pthread_mutex_unlock(&tp->mtx);
+
+    /* Join before destroying: workers still touch mtx/queue until they exit. */
+    for (int i = 0; i < tp->nworkers; i++)
+        pthread_join(tp->workers[i], NULL);
+
+    pthread_mutex_destroy(&tp->mtx);
+    pthread_cond_destroy(&tp->not_empty);
+    pthread_cond_destroy(&tp->not_full);
+    free(tp->workers);
+    free(tp->queue);
+    free(tp);
+}
+
+/*
+ * Read the completed-job counter. Taken under the lock because a plain read of
+ * a value another thread writes is a data race (undefined behaviour) even for
+ * a single word.
+ */
+unsigned long threadpool_completed(ThreadPool *tp)
+{
+    pthread_mutex_lock(&tp->mtx);
+    unsigned long c = tp->completed;
+    pthread_mutex_unlock(&tp->mtx);
+    return c;
+}
