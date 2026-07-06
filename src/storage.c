@@ -17,9 +17,11 @@
  *     WAL and made durable BEFORE the data pages are touched (see commit_mods),
  *     giving atomicity and durability -- the point that makes DuraKV crash-safe.
  *
- *  4. CACHING. The live read/write path flows through the write-back buffer
- *     pool; page_read/page_write are the single choke point where encryption
- *     at rest is (later) applied.
+ *  4. CONCURRENCY & CACHING. Public ops are thin wrappers that take a
+ *     pthread_rwlock (shared for reads, exclusive for writes) around lock-free
+ *     *_unlocked cores; the live read/write path flows through the write-back
+ *     buffer pool. page_read/page_write are the single choke point where
+ *     encryption at rest is (later) applied.
  *
  * See include/storage.h for the public contract and on-disk structures.
  */
@@ -344,7 +346,7 @@ static int commit_mods(DB *db, Mod *mods, int nmods)
  * WAL, so a crash mid-update never leaves a half-applied key. The directory is
  * updated only after the commit succeeds.
  */
-int db_set(DB *db, const char *key, const void *val, uint32_t vlen)
+static int db_set_unlocked(DB *db, const char *key, const void *val, uint32_t vlen)
 {
     size_t klen = strlen(key);
     if (klen == 0 || klen > 0xFFFF) return DK_INVAL;
@@ -395,8 +397,8 @@ int db_set(DB *db, const char *key, const void *val, uint32_t vlen)
     return DK_OK;
 }
 
-int db_get(DB *db, const char *key, void *valbuf, uint32_t buflen,
-           uint32_t *vlen_out)
+static int db_get_unlocked(DB *db, const char *key, void *valbuf, uint32_t buflen,
+                           uint32_t *vlen_out)
 {
     DirEntry *e = dir_get(&db->dir, key);
     if (!e) return DK_NOTFOUND;
@@ -415,7 +417,7 @@ int db_get(DB *db, const char *key, void *valbuf, uint32_t buflen,
     return DK_OK;
 }
 
-int db_del(DB *db, const char *key)
+static int db_del_unlocked(DB *db, const char *key)
 {
     DirEntry *old = dir_get(&db->dir, key);
     if (!old) return DK_NOTFOUND;
@@ -433,15 +435,46 @@ int db_del(DB *db, const char *key)
     return DK_OK;
 }
 
+/* ---- public, thread-safe wrappers -------------------------------------- *
+ * Writers take the rwlock exclusively; readers share it. The buffer pool has
+ * its own internal mutex, so concurrent readers may fault pages safely. The
+ * nesting order is always DB rwlock (outer) -> buffer-pool mutex (inner). */
+
+int db_set(DB *db, const char *key, const void *val, uint32_t vlen)
+{
+    pthread_rwlock_wrlock(&db->lock);
+    int rc = db_set_unlocked(db, key, val, vlen);
+    pthread_rwlock_unlock(&db->lock);
+    return rc;
+}
+
+int db_get(DB *db, const char *key, void *valbuf, uint32_t buflen, uint32_t *vlen_out)
+{
+    pthread_rwlock_rdlock(&db->lock);
+    int rc = db_get_unlocked(db, key, valbuf, buflen, vlen_out);
+    pthread_rwlock_unlock(&db->lock);
+    return rc;
+}
+
+int db_del(DB *db, const char *key)
+{
+    pthread_rwlock_wrlock(&db->lock);
+    int rc = db_del_unlocked(db, key);
+    pthread_rwlock_unlock(&db->lock);
+    return rc;
+}
+
 /* Force a consistent, fully-durable state and mark it in the WAL. After a
  * checkpoint, recovery need not replay anything before it -- which is what
  * bounds recovery time and lets the WAL be trimmed. */
 void db_checkpoint(DB *db)
 {
+    pthread_rwlock_wrlock(&db->lock);
     bp_flush_all(db->bp);        /* push dirty frames to data.db */
     fsync(db->data_fd);          /* all data pages now durable   */
     wal_append(db, WAL_CHECKPOINT, 0, 0, db->page_count, NULL, 0, NULL, 0);
     wal_fsync(db);
+    pthread_rwlock_unlock(&db->lock);
 }
 
 /* ====================================================================== */
@@ -511,6 +544,7 @@ DB *db_open_ex(const char *data_path, const char *wal_path,
 
     db->next_lsn = 1;
     db->next_txn = 1;
+    pthread_rwlock_init(&db->lock, NULL);
 
     /* ORDER MATTERS: recover first so the pages are correct, THEN build the
      * directory from those recovered pages, THEN start caching. Doing recovery
@@ -533,6 +567,7 @@ void db_close(DB *db)
     fsync(db->data_fd);
     fsync(db->wal_fd);
     bp_destroy(db->bp);
+    pthread_rwlock_destroy(&db->lock);
     dir_free(&db->dir);
     free(db->page_free);
     close(db->data_fd);

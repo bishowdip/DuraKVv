@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <pthread.h>
 #include "replacement.h"        /* PolicyKind */
 
 #ifndef PAGE_SIZE
@@ -73,6 +74,7 @@ typedef struct DB {
     uint16_t *page_free;        /* free bytes per page (index by page id)    */
     size_t    page_free_cap;    /* capacity of page_free[]                   */
     struct BufferPool *bp;      /* page cache (NULL during recovery)         */
+    pthread_rwlock_t lock;      /* many concurrent readers, exclusive writers*/
 } DB;
 
 /* ---- return codes ------------------------------------------------------ */
