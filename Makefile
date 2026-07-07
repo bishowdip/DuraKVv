@@ -26,7 +26,7 @@ durakv-client: $(NET) src/client.c
 
 # --- unit tests ----------------------------------------------------------
 tests: test_storage test_wal_recovery test_bufferpool test_belady mem_demo \
-       demo_race demo_deadlock demo_scheduler loadtest
+       demo_race demo_deadlock demo_scheduler loadtest test_ipc
 
 test_storage: $(CORE) tests/test_storage.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -42,6 +42,10 @@ test_belady: $(CORE) tests/test_belady.c
 
 mem_demo: tests/mem_demo.c
 	$(CC) $(CFLAGS) -o $@ $^
+
+# --- network/IPC tests ---------------------------------------------------
+test_ipc: $(CORE) $(NET) src/server.c tests/test_ipc.c
+	$(CC) $(CFLAGS) -DDURAKV_SERVER_NO_MAIN -o $@ $^ $(LDFLAGS)
 
 # --- concurrency demos ---------------------------------------------------
 demo_race: $(CORE) tests/demo_race.c
@@ -66,6 +70,7 @@ test: tests
 	@echo "== demo_deadlock =="     && ./demo_deadlock
 	@echo "== demo_scheduler =="    && ./demo_scheduler
 	@echo "== loadtest =="          && ./loadtest
+	@echo "== test_ipc =="          && ./test_ipc
 
 crashtest: durakv
 	./scripts/crashtest.sh
@@ -77,7 +82,7 @@ clean:
 	rm -f durakv durakv-server durakv-client
 	rm -f test_storage test_wal_recovery test_bufferpool test_belady mem_demo
 	rm -f *.sock /tmp/durakv_*.sock
-	rm -f demo_race demo_deadlock demo_scheduler loadtest
+	rm -f demo_race demo_deadlock demo_scheduler loadtest test_ipc
 	rm -f *.o
 	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log
 	rm -f /tmp/durakv_crash.out /tmp/durakv_crash.acked /tmp/durakv_recovery.db.snap
