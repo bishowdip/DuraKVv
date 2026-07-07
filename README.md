@@ -1,13 +1,16 @@
 # DuraKVv
 
-A key–value store in C, built in layers. The goal is a crash-safe,
-multi-client store; this is the first layer — the storage engine.
+A crash-safe, multi-client key–value store in C, built in layers: the durable
+spine (storage + write-ahead log + crash recovery), a buffer pool (paging with
+FIFO/LRU eviction), concurrency (thread pool, round-robin scheduler, a
+thread-safe store), and network/IPC (an AF_UNIX client/server). The only
+dependency so far is **pthreads** (in libc).
 
 ## Build & run
 
 ```bash
-make            # build the durakv CLI and the tests
-make test       # run the unit tests
+make            # build the durakv CLI, server and client, and the tests
+make test       # run the unit tests and demos
 make crashtest  # the headline kill -9 durability demo
 make clean
 ```
@@ -155,15 +158,52 @@ write lock, so commits serialise at a few ms each. That is the price of
 durability, paid deliberately. `make crashtest_concurrent` runs the `kill -9`
 loop with 4 writer threads per batch.
 
+## Network & IPC (Phase 4)
+
+Clients reach the store over a **Unix domain socket** (`AF_UNIX`) rather than
+TCP/IP — the right tool for local inter-process communication (no network
+stack, access controlled by filesystem permissions, lower overhead). The
+server (`src/server.c`) accepts connections and hands each to the thread pool,
+so many clients are served at once; messages use length-prefixed framing
+(`src/protocol.c`).
+
+```bash
+./durakv-server /tmp/durakv.sock data.db wal.log 4   # 4 worker threads
+./durakv-client /tmp/durakv.sock                     # friendly guided client
+```
+
+Wire commands: `PING`, `SET <key> <value>`, `GET <key>`, `DEL <key>`,
+`STATS`, `QUIT`. Each message is a length-prefixed frame
+(`[4-byte big-endian length][payload]`).
+
+```
+$ printf 'SET city kathmandu\nGET city\nQUIT\n' | ./durakv-client /tmp/durakv.sock
+OK
+OK kathmandu
+BYE
+```
+
+For pure **message passing**, `tests/demo_mqueue.c` shows a System V message
+queue shared between a parent and child process, including type-selective
+receive (pull a priority message ahead of FIFO ones) — something a byte stream
+cannot do. (System V IPC is used because macOS does not implement POSIX
+`mq_*`.)
+
+| Test | Proves |
+|------|--------|
+| `tests/test_ipc.c` | 8 concurrent clients × 50 ops over AF_UNIX, framed responses verified |
+| `tests/demo_mqueue.c` | inter-process message sharing via a System V message queue |
+
 ## Layout
 
 ```
 include/  storage.h wal.h recovery.h bufferpool.h replacement.h
-          threadpool.h scheduler.h
+          threadpool.h scheduler.h protocol.h server.h
 src/      storage.c wal.c recovery.c bufferpool.c replacement.c
-          threadpool.c scheduler.c durakv.c
+          threadpool.c scheduler.c protocol.c server.c client.c durakv.c
 tests/    test_storage.c test_wal_recovery.c test_bufferpool.c test_belady.c
           mem_demo.c demo_race.c demo_deadlock.c demo_scheduler.c loadtest.c
+          demo_mqueue.c test_ipc.c
 scripts/  crashtest.sh
 ```
 
@@ -177,4 +217,5 @@ scripts/  crashtest.sh
 | `tests/test_belady.c` | Belady's anomaly under FIFO; LRU stays monotonic |
 | `tests/mem_demo.c` | a simple pointer-level paging + FIFO demonstration |
 | `tests/demo_*` / `loadtest` | concurrency (see the Phase 3 table above) |
+| `tests/test_ipc.c` / `demo_mqueue.c` | network/IPC (see the Phase 4 table above) |
 | `scripts/crashtest.sh` | committed keys survive repeated `kill -9`; `make crashtest_concurrent` does it with 4 writer threads |
