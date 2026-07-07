@@ -98,3 +98,44 @@ int frame_read(int fd, void *buf, uint32_t cap, uint32_t *len)
     *len = n;
     return 0;
 }
+
+/* ---- AF_UNIX endpoint helpers ------------------------------------------ */
+
+static int fill_addr(struct sockaddr_un *a, const char *path)
+{
+    if (strlen(path) >= sizeof(a->sun_path)) { errno = ENAMETOOLONG; return -1; }
+    memset(a, 0, sizeof(*a));
+    a->sun_family = AF_UNIX;
+    strncpy(a->sun_path, path, sizeof(a->sun_path) - 1);
+    return 0;
+}
+
+/* Create a listening AF_UNIX socket bound to `path`. Returns the socket fd, or
+ * -1 on error. */
+int unix_listen(const char *path, int backlog)
+{
+    struct sockaddr_un addr;
+    if (fill_addr(&addr, path) != 0) return -1;
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    unlink(path);                              /* remove any stale socket node */
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) { close(fd); return -1; }
+    if (listen(fd, backlog) != 0) { close(fd); return -1; }
+    return fd;
+}
+
+/* Connect to an AF_UNIX server listening at `path`. Returns a connected fd, or
+ * -1 on error. */
+int unix_connect(const char *path)
+{
+    struct sockaddr_un addr;
+    if (fill_addr(&addr, path) != 0) return -1;
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) { close(fd); return -1; }
+    return fd;
+}
