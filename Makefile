@@ -8,12 +8,20 @@ LDFLAGS ?= -pthread
 CORE    := src/storage.c src/wal.c src/recovery.c \
            src/bufferpool.c src/replacement.c \
            src/threadpool.c src/scheduler.c
+NET     := src/protocol.c
 
 .PHONY: all tests test crashtest crashtest_concurrent clean
 
-all: durakv tests
+all: durakv durakv-server durakv-client tests
 
 durakv: $(CORE) src/durakv.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# --- network/IPC binaries (AF_UNIX) --------------------------------------
+durakv-server: $(CORE) $(NET) src/server.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+durakv-client: $(NET) src/client.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # --- unit tests ----------------------------------------------------------
@@ -66,7 +74,9 @@ crashtest_concurrent: durakv
 	./scripts/crashtest.sh 12 400 4    # 4 writer threads per batch
 
 clean:
-	rm -f durakv test_storage test_wal_recovery test_bufferpool test_belady mem_demo
+	rm -f durakv durakv-server durakv-client
+	rm -f test_storage test_wal_recovery test_bufferpool test_belady mem_demo
+	rm -f *.sock /tmp/durakv_*.sock
 	rm -f demo_race demo_deadlock demo_scheduler loadtest
 	rm -f *.o
 	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log
