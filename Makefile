@@ -34,7 +34,7 @@ durakv-client: $(NET) src/client.c
 # --- unit tests ----------------------------------------------------------
 tests: test_storage test_wal_recovery test_bufferpool test_belady mem_demo \
        demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue \
-       file_demo demo_crypto
+       file_demo demo_crypto demo_auth
 
 test_storage: $(CORE) tests/test_storage.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -56,6 +56,9 @@ file_demo: tests/file_demo.c
 
 # --- security demos (need libsodium) -------------------------------------
 demo_crypto: src/crypto.c tests/demo_crypto.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(SODIUM_LIBS)
+
+demo_auth: src/crypto.c src/auth.c src/permissions.c tests/demo_auth.c
 	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(SODIUM_LIBS)
 
 # --- network/IPC tests ---------------------------------------------------
@@ -92,6 +95,7 @@ test: tests
 	@echo "== demo_mqueue =="       && ./demo_mqueue
 	@echo "== file_demo =="         && ./file_demo
 	@echo "== demo_crypto =="       && ./demo_crypto
+	@echo "== demo_auth =="         && ./demo_auth
 
 crashtest: durakv
 	./scripts/crashtest.sh
@@ -103,7 +107,7 @@ clean:
 	rm -f durakv durakv-server durakv-client
 	rm -f test_storage test_wal_recovery test_bufferpool test_belady mem_demo
 	rm -f *.sock /tmp/durakv_*.sock
-	rm -f demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue file_demo demo_crypto
+	rm -f demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue file_demo demo_crypto demo_auth
 	rm -f *.o
 	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log
 	rm -f /tmp/durakv_crash.out /tmp/durakv_crash.acked /tmp/durakv_recovery.db.snap
