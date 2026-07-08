@@ -6,17 +6,27 @@ CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -g -Iinclude -pthread
 LDFLAGS ?= -pthread
 
 CORE    := src/storage.c src/wal.c src/recovery.c \
-           src/bufferpool.c src/replacement.c
+           src/bufferpool.c src/replacement.c \
+           src/threadpool.c src/scheduler.c
+NET     := src/protocol.c
 
-.PHONY: all tests test crashtest clean
+.PHONY: all tests test crashtest crashtest_concurrent clean
 
-all: durakv tests
+all: durakv durakv-server durakv-client tests
 
 durakv: $(CORE) src/durakv.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+# --- network/IPC binaries (AF_UNIX) --------------------------------------
+durakv-server: $(CORE) $(NET) src/server.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+durakv-client: $(NET) src/client.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
 # --- unit tests ----------------------------------------------------------
-tests: test_storage test_wal_recovery
+tests: test_storage test_wal_recovery test_bufferpool test_belady mem_demo \
+       demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue
 
 test_storage: $(CORE) tests/test_storage.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -24,15 +34,59 @@ test_storage: $(CORE) tests/test_storage.c
 test_wal_recovery: $(CORE) tests/test_wal_recovery.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_bufferpool: $(CORE) tests/test_bufferpool.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_belady: $(CORE) tests/test_belady.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+mem_demo: tests/mem_demo.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+# --- network/IPC tests ---------------------------------------------------
+test_ipc: $(CORE) $(NET) src/server.c tests/test_ipc.c
+	$(CC) $(CFLAGS) -DDURAKV_SERVER_NO_MAIN -o $@ $^ $(LDFLAGS)
+
+demo_mqueue: tests/demo_mqueue.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+# --- concurrency demos ---------------------------------------------------
+demo_race: $(CORE) tests/demo_race.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+demo_deadlock: $(CORE) tests/demo_deadlock.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+demo_scheduler: $(CORE) tests/demo_scheduler.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+loadtest: $(CORE) tests/loadtest.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
 test: tests
 	@echo "== test_storage =="      && ./test_storage
 	@echo "== test_wal_recovery ==" && ./test_wal_recovery
+	@echo "== test_bufferpool =="   && ./test_bufferpool
+	@echo "== test_belady =="       && ./test_belady
+	@echo "== mem_demo =="          && ./mem_demo
+	@echo "== demo_race =="         && ./demo_race
+	@echo "== demo_deadlock =="     && ./demo_deadlock
+	@echo "== demo_scheduler =="    && ./demo_scheduler
+	@echo "== loadtest =="          && ./loadtest
+	@echo "== test_ipc =="          && ./test_ipc
+	@echo "== demo_mqueue =="       && ./demo_mqueue
 
 crashtest: durakv
 	./scripts/crashtest.sh
 
+crashtest_concurrent: durakv
+	./scripts/crashtest.sh 12 400 4    # 4 writer threads per batch
+
 clean:
-	rm -f durakv test_storage test_wal_recovery
+	rm -f durakv durakv-server durakv-client
+	rm -f test_storage test_wal_recovery test_bufferpool test_belady mem_demo
+	rm -f *.sock /tmp/durakv_*.sock
+	rm -f demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue
 	rm -f *.o
 	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log
 	rm -f /tmp/durakv_crash.out /tmp/durakv_crash.acked /tmp/durakv_recovery.db.snap

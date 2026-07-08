@@ -15,26 +15,53 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "storage.h"
+#include "bufferpool.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <unistd.h>
 
-/* Commit `count` keys starting at `start`. Each committed key is announced on
- * stdout only after db_set has fsync'd its WAL, so the crashtest can trust that
- * every "COMMIT" line it reads is already durable. */
-static void run_stress(DB *db, long count, long start)
+/* Shared by stress worker threads: a printf lock keeps COMMIT lines whole. */
+static pthread_mutex_t g_print_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct { DB *db; long start, count, threads, tid; } StressArg;
+
+/* One stress worker: commits its stripe of the key range. Each committed key is
+ * announced on stdout only after db_set has fsync'd its WAL, so the crashtest
+ * can trust that every "COMMIT" line it reads is already durable. */
+static void *stress_worker(void *arg)
 {
+    StressArg *a = arg;
     char key[64], val[64];
-    for (long i = start; i < start + count; i++) {
+    for (long i = a->start + a->tid; i < a->start + a->count; i += a->threads) {
         snprintf(key, sizeof(key), "key%ld", i);
         snprintf(val, sizeof(val), "val%ld", i);
-        if (db_set(db, key, val, (uint32_t)strlen(val)) == DK_OK) {
+        if (db_set(a->db, key, val, (uint32_t)strlen(val)) == DK_OK) {
+            /* db_set already fsync'd the WAL, so this COMMIT is durable */
+            pthread_mutex_lock(&g_print_mtx);
             printf("COMMIT %s\n", key);
             fflush(stdout);
+            pthread_mutex_unlock(&g_print_mtx);
         }
     }
+    return NULL;
+}
+
+/* Commit `count` keys starting at `start`, optionally across `threads` worker
+ * threads to exercise the store under concurrent load. */
+static void run_stress(DB *db, long count, long start, long threads)
+{
+    if (threads < 1) threads = 1;
+    StressArg *args = calloc(threads, sizeof(*args));
+    pthread_t *th   = calloc(threads, sizeof(*th));
+    for (long t = 0; t < threads; t++) {
+        args[t] = (StressArg){ db, start, count, threads, t };
+        pthread_create(&th[t], NULL, stress_worker, &args[t]);
+    }
+    for (long t = 0; t < threads; t++) pthread_join(th[t], NULL);
+    free(args); free(th);
 }
 
 /* Raw line-command interpreter for piped/scripted input (set/get/del/list/
@@ -75,6 +102,16 @@ static void run_interactive(DB *db)
         } else if (strcmp(cmd, "checkpoint") == 0) {
             db_checkpoint(db);
             printf("OK\n");
+        } else if (strcmp(cmd, "stats") == 0) {
+            BPStats s = bp_stats(db->bp);
+            printf("policy=%s frames=%zu pages=%llu\n",
+                   bp_policy_name(db->bp), bp_nframes(db->bp),
+                   (unsigned long long)db->page_count);
+            printf("accesses=%llu hits=%llu faults=%llu "
+                   "evictions=%llu writebacks=%llu hit_ratio=%.1f%%\n",
+                   (unsigned long long)s.accesses, (unsigned long long)s.hits,
+                   (unsigned long long)s.faults,   (unsigned long long)s.evictions,
+                   (unsigned long long)s.writebacks, 100.0 * bp_hit_ratio(db->bp));
         } else if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0) {
             break;
         } else {
@@ -106,7 +143,7 @@ static int ask(const char *prompt, char *buf, size_t cap)
     return 1;
 }
 
-static void menu_banner(void)
+static void menu_banner(DB *db)
 {
     printf("\n" C_CYAN C_BOLD
            "  ____                  _  ____   __\n"
@@ -114,7 +151,9 @@ static void menu_banner(void)
            " | | | | | | | '__/ _` | ' /  \\ V / \n"
            " | |_| | |_| | | | (_| | . \\   | |  \n"
            " |____/ \\__,_|_|  \\__,_|_|\\_\\  |_|  \n" C_RESET);
-    printf(C_DIM "  crash-safe key/value store" C_RESET "\n");
+    printf(C_DIM "  crash-safe key/value store" C_RESET
+           "   [policy=%s, frames=%zu]\n",
+           bp_policy_name(db->bp), bp_nframes(db->bp));
 }
 
 static void menu_show(void)
@@ -123,9 +162,10 @@ static void menu_show(void)
     printf("    " C_GREEN "1" C_RESET ") Set a value      "
            "    " C_GREEN "4" C_RESET ") List all keys\n");
     printf("    " C_GREEN "2" C_RESET ") Get a value      "
-           "    " C_GREEN "5" C_RESET ") Save to disk (checkpoint)\n");
+           "    " C_GREEN "5" C_RESET ") Show stats\n");
     printf("    " C_GREEN "3" C_RESET ") Delete a key     "
-           "    " C_GREEN "0" C_RESET ") Quit\n");
+           "    " C_GREEN "6" C_RESET ") Save to disk (checkpoint)\n");
+    printf("    " C_GREEN "0" C_RESET ") Quit\n");
 }
 
 static void run_menu(DB *db)
@@ -133,11 +173,11 @@ static void run_menu(DB *db)
     char choice[64], key[1024];
     static char val[1 << 20];
 
-    menu_banner();
+    menu_banner(db);
 
     for (;;) {
         menu_show();
-        if (!ask("\n  choose [0-5]: ", choice, sizeof(choice))) { printf("\n"); break; }
+        if (!ask("\n  choose [0-6]: ", choice, sizeof(choice))) { printf("\n"); break; }
         if (choice[0] == '\0') continue;
 
         if (!strcmp(choice, "1")) {
@@ -180,6 +220,16 @@ static void run_menu(DB *db)
             else            printf(C_DIM "    %zu key(s) total\n" C_RESET, count);
 
         } else if (!strcmp(choice, "5")) {
+            BPStats s = bp_stats(db->bp);
+            printf("    buffer pool : %s, %zu frames, %llu pages on disk\n",
+                   bp_policy_name(db->bp), bp_nframes(db->bp),
+                   (unsigned long long)db->page_count);
+            printf("    accesses=%llu  hits=%llu  faults=%llu  "
+                   "hit ratio=" C_BOLD "%.1f%%" C_RESET "\n",
+                   (unsigned long long)s.accesses, (unsigned long long)s.hits,
+                   (unsigned long long)s.faults, 100.0 * bp_hit_ratio(db->bp));
+
+        } else if (!strcmp(choice, "6")) {
             db_checkpoint(db);
             printf(C_GREEN "    \xE2\x9C\x93 all data flushed safely to disk\n" C_RESET);
 
@@ -187,7 +237,7 @@ static void run_menu(DB *db)
             printf(C_CYAN "  goodbye \xE2\x80\x94 your data is saved.\n" C_RESET);
             break;
         } else {
-            printf(C_RED "    please choose a number from 0 to 5\n" C_RESET);
+            printf(C_RED "    please choose a number from 0 to 6\n" C_RESET);
         }
     }
 }
@@ -195,19 +245,29 @@ static void run_menu(DB *db)
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <data.db> <wal.log> [stress N START]\n", argv[0]);
+        fprintf(stderr,
+            "usage: %s <data.db> <wal.log> [stress N START [THREADS]]\n"
+            "  env: DURAKV_FRAMES=<n>  DURAKV_POLICY=fifo|lru\n", argv[0]);
         return 2;
     }
 
-    DB *db = db_open(argv[1], argv[2]);
+    /* buffer pool is configurable via env: DURAKV_FRAMES, DURAKV_POLICY */
+    const char *fenv = getenv("DURAKV_FRAMES");
+    const char *penv = getenv("DURAKV_POLICY");
+    size_t frames = fenv ? (size_t)strtoul(fenv, NULL, 10) : 64;
+    if (frames == 0) frames = 64;
+    PolicyKind policy = (penv && strcmp(penv, "fifo") == 0) ? POLICY_FIFO : POLICY_LRU;
+
+    DB *db = db_open_ex(argv[1], argv[2], frames, policy);
     if (!db) { fprintf(stderr, "failed to open store\n"); return 1; }
 
     /* Three modes: batch stress (for the crashtest), a guided menu for a human
      * at a terminal, or the raw parser for pipes/scripts. */
     if (argc >= 5 && strcmp(argv[3], "stress") == 0) {
-        long count = strtol(argv[4], NULL, 10);
-        long start = argc >= 6 ? strtol(argv[5], NULL, 10) : 0;
-        run_stress(db, count, start);
+        long count   = strtol(argv[4], NULL, 10);
+        long start   = argc >= 6 ? strtol(argv[5], NULL, 10) : 0;
+        long threads = argc >= 7 ? strtol(argv[6], NULL, 10) : 1;
+        run_stress(db, count, start, threads);
     } else if (isatty(STDIN_FILENO)) {
         run_menu(db);            /* friendly menu for a human at the TTY */
     } else {
