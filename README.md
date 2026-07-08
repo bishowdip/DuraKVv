@@ -3,8 +3,9 @@
 A crash-safe, multi-client key–value store in C, built in layers: the durable
 spine (storage + write-ahead log + crash recovery), a buffer pool (paging with
 FIFO/LRU eviction), concurrency (thread pool, round-robin scheduler, a
-thread-safe store), and network/IPC (an AF_UNIX client/server). The only
-dependency so far is **pthreads** (in libc).
+thread-safe store), network/IPC (an AF_UNIX client/server), and a security
+layer (encryption, authentication, permissions). The core engine needs only
+**pthreads** (in libc); **libsodium** is confined to the security demos.
 
 ## Build & run
 
@@ -194,16 +195,44 @@ cannot do. (System V IPC is used because macOS does not implement POSIX
 | `tests/test_ipc.c` | 8 concurrent clients × 50 ops over AF_UNIX, framed responses verified |
 | `tests/demo_mqueue.c` | inter-process message sharing via a System V message queue |
 
+## Security (Phase 5)
+
+Built on **libsodium** (`brew install libsodium`); the security demos link it,
+while the core engine stays dependency-free.
+
+- **File permissions** (`tests/file_demo.c`) — the POSIX model directly:
+  `open`/`creat` with a mode, `chmod` to change rwx, `access()` to query, and
+  the kernel refusing a write to a `0444` file.
+- **Encryption** (`src/crypto.c`) — XChaCha20-Poly1305 AEAD (chosen over
+  AES-GCM: no hardware-AES needed, and a 192-bit nonce makes random nonces
+  safe). The demo shows ciphertext (no plaintext visible) and that flipping one
+  byte makes decryption **fail** — confidentiality *and* integrity.
+- **Authentication** (`src/auth.c`) — passwords stored as **Argon2id** hashes
+  (memory-hard); wrong passwords and unknown users are rejected identically.
+- **Permissions** (`src/permissions.c`) — owner/group/other **rwx** on key
+  namespaces, exactly like Unix file bits (first-match triad precedence).
+
+| Test | Proves |
+|------|--------|
+| `tests/file_demo.c` | POSIX create / chmod / access; write to a read-only file denied |
+| `tests/demo_crypto.c` | AEAD confidentiality + integrity; Argon2id password auth |
+| `tests/demo_auth.c` | Argon2 login + namespace rwx allow/deny across users |
+
+Build the security demos (need libsodium): `make demo_crypto demo_auth`.
+
 ## Layout
 
 ```
 include/  storage.h wal.h recovery.h bufferpool.h replacement.h
           threadpool.h scheduler.h protocol.h server.h
+          crypto.h auth.h permissions.h
 src/      storage.c wal.c recovery.c bufferpool.c replacement.c
           threadpool.c scheduler.c protocol.c server.c client.c durakv.c
+          crypto.c auth.c permissions.c
 tests/    test_storage.c test_wal_recovery.c test_bufferpool.c test_belady.c
           mem_demo.c demo_race.c demo_deadlock.c demo_scheduler.c loadtest.c
           demo_mqueue.c test_ipc.c
+          file_demo.c demo_crypto.c demo_auth.c
 scripts/  crashtest.sh
 ```
 
@@ -218,4 +247,5 @@ scripts/  crashtest.sh
 | `tests/mem_demo.c` | a simple pointer-level paging + FIFO demonstration |
 | `tests/demo_*` / `loadtest` | concurrency (see the Phase 3 table above) |
 | `tests/test_ipc.c` / `demo_mqueue.c` | network/IPC (see the Phase 4 table above) |
+| `tests/file_demo.c` / `demo_crypto.c` / `demo_auth.c` | security (see the Phase 5 table above) |
 | `scripts/crashtest.sh` | committed keys survive repeated `kill -9`; `make crashtest_concurrent` does it with 4 writer threads |
