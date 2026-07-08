@@ -1,5 +1,6 @@
-# DuraKV -- durable storage engine + in-RAM buffer pool. Only dependency so
-# far is pthreads (in libc), used by the buffer pool.
+# DuraKV -- durable storage engine, buffer pool, concurrency, AF_UNIX IPC and a
+# security layer. The core engine needs only pthreads (in libc); libsodium is
+# confined to the security demos below (crypto/auth) via SODIUM_CFLAGS/LIBS.
 
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -g -Iinclude -pthread
@@ -9,6 +10,12 @@ CORE    := src/storage.c src/wal.c src/recovery.c \
            src/bufferpool.c src/replacement.c \
            src/threadpool.c src/scheduler.c
 NET     := src/protocol.c
+SEC     := src/crypto.c src/auth.c src/permissions.c
+
+# libsodium (security layer only) -- located via Homebrew, fallback /usr/local
+SODIUM_PREFIX ?= $(shell brew --prefix libsodium 2>/dev/null || echo /usr/local)
+SODIUM_CFLAGS := -I$(SODIUM_PREFIX)/include
+SODIUM_LIBS   := -L$(SODIUM_PREFIX)/lib -lsodium
 
 .PHONY: all tests test crashtest crashtest_concurrent clean
 
