@@ -26,8 +26,8 @@ durakv: $(CORE) $(ENCSRC) src/durakv.c
 	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
 # --- network/IPC binaries (AF_UNIX) --------------------------------------
-durakv-server: $(CORE) $(NET) src/server.c
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+durakv-server: $(CORE) $(NET) $(SEC) src/encryption.c src/server.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
 durakv-client: $(NET) src/client.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -69,8 +69,8 @@ demo_encrypt: $(CORE) $(ENCSRC) tests/demo_encrypt.c
 	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
 # --- network/IPC tests ---------------------------------------------------
-test_ipc: $(CORE) $(NET) src/server.c tests/test_ipc.c
-	$(CC) $(CFLAGS) -DDURAKV_SERVER_NO_MAIN -o $@ $^ $(LDFLAGS)
+test_ipc: $(CORE) $(NET) $(SEC) src/encryption.c src/server.c tests/test_ipc.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -DDURAKV_SERVER_NO_MAIN -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
 demo_mqueue: tests/demo_mqueue.c
 	$(CC) $(CFLAGS) -o $@ $^

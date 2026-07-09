@@ -2,16 +2,20 @@
  * server.c -- AF_UNIX server: parse, validate, dispatch commands to the store,
  * one worker per connection. See include/server.h.
  *
- * The accept loop hands each connection to the thread pool, so many clients are
- * served concurrently. Every message is a length-prefixed frame carrying one
- * text command (PING/SET/GET/DEL/STATS/QUIT). (Authentication, per-key
- * permissions and the audit log are layered on top in a later phase.)
+ * Security is opt-in via the DURAKV_SECURE environment variable. When enabled,
+ * a connection must AUTH before issuing data commands, every SET/GET/DEL is
+ * checked against the caller's rwx permission on the key's namespace, and every
+ * attempt is written to the hash-chained audit log. When disabled the server
+ * runs "open" (used by the plain IPC test).
  */
 #define _POSIX_C_SOURCE 200809L
 #include "server.h"
 #include "protocol.h"
 #include "threadpool.h"
 #include "bufferpool.h"
+#include "auth.h"
+#include "permissions.h"
+#include "audit.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,20 +36,85 @@
 static volatile sig_atomic_t g_stop = 0;
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
 
+/* ---- security context (shared by all connections) ---------------------- */
+
+typedef struct {
+    AuthStore      *auth;
+    PermTable      *perm;
+    Audit          *audit;
+    pthread_mutex_t audit_mtx;
+} SecCtx;
+
+static SecCtx *sec_create(void)
+{
+    SecCtx *s = calloc(1, sizeof(*s));
+    s->auth = auth_create();
+    s->perm = perm_create();
+    const char *apath = getenv("DURAKV_AUDIT");
+    s->audit = audit_open(apath ? apath : "audit.log");
+    pthread_mutex_init(&s->audit_mtx, NULL);
+
+    /* seeded demo policy: two staff users and three namespaces */
+    auth_register(s->auth, "alice", "alice-secret", "staff");
+    auth_register(s->auth, "bob",   "bob-secret",   "staff");
+    perm_set(s->perm, "alice",  "alice", "staff", 0640); /* alice rw, staff r  */
+    perm_set(s->perm, "bob",    "bob",   "staff", 0640); /* bob rw,   staff r  */
+    perm_set(s->perm, "shared", "alice", "staff", 0660); /* alice+staff rw     */
+    return s;
+}
+
+static void sec_destroy(SecCtx *s)
+{
+    if (!s) return;
+    auth_destroy(s->auth);
+    perm_destroy(s->perm);
+    audit_close(s->audit);
+    pthread_mutex_destroy(&s->audit_mtx);
+    free(s);
+}
+
+static void sec_audit(SecCtx *s, const char *user, const char *op,
+                      const char *key, const char *result)
+{
+    if (!s->audit) return;
+    pthread_mutex_lock(&s->audit_mtx);
+    audit_append(s->audit, user, op, key, result);
+    pthread_mutex_unlock(&s->audit_mtx);
+}
+
+/* namespace = the prefix before ':' in a key, else "default" */
+static void extract_ns(const char *key, char *ns, size_t cap)
+{
+    const char *colon = strchr(key, ':');
+    if (colon) {
+        size_t n = (size_t)(colon - key);
+        if (n >= cap) n = cap - 1;
+        memcpy(ns, key, n); ns[n] = '\0';
+    } else {
+        snprintf(ns, cap, "default");
+    }
+}
+
 /* ---- per-connection session state ------------------------------------- */
 
 typedef struct {
-    int  fd;
-    DB  *db;
+    int     fd;
+    DB     *db;
+    SecCtx *sec;            /* NULL => open mode (no auth/perm/audit) */
+    int     authed;
+    char    user[64];
+    char    group[64];
 } Conn;
 
 /* ---- command dispatch -------------------------------------------------- */
 
 /*
  * Parse and execute one text command, writing the reply into `resp` and
- * returning its length. This is where the protocol's verbs live (PING/SET/GET/
- * DEL/STATS/QUIT). Every recognised command produces exactly one response line,
- * so the protocol stays a simple request/response.
+ * returning its length. This is where the protocol's verbs live (PING/AUTH/
+ * SET/GET/DEL/STATS/QUIT) and, in secure mode, where the AUTH gate and per-key
+ * permission checks are enforced before any data is touched. Every recognised
+ * data command produces exactly one response line, so the protocol stays a
+ * simple request/response.
  */
 static size_t handle_command(Conn *c, const char *payload, uint32_t plen,
                              char *resp, size_t respcap)
@@ -56,7 +125,7 @@ static size_t handle_command(Conn *c, const char *payload, uint32_t plen,
     memcpy(buf, payload, plen);
     buf[plen] = '\0';
 
-    DB *db = c->db;
+    DB *db = c->db; SecCtx *sec = c->sec;
     char *save = NULL;
     char *cmd = strtok_r(buf, " ", &save);
     int n = 0;
@@ -65,6 +134,31 @@ static size_t handle_command(Conn *c, const char *payload, uint32_t plen,
 
     if (strcmp(cmd, "PING") == 0) { n = snprintf(resp, respcap, "PONG"); goto done; }
     if (strcmp(cmd, "QUIT") == 0) { n = snprintf(resp, respcap, "BYE");  goto done; }
+
+    if (strcmp(cmd, "AUTH") == 0) {
+        char *u = strtok_r(NULL, " ", &save);
+        char *p = strtok_r(NULL, " ", &save);
+        if (!sec)        n = snprintf(resp, respcap, "ERR auth not enabled");
+        else if (!u || !p) n = snprintf(resp, respcap, "ERR usage AUTH <user> <pass>");
+        else if (auth_login(sec->auth, u, p) > 0) {
+            c->authed = 1;
+            snprintf(c->user, sizeof(c->user), "%s", u);
+            const char *g = auth_group_of(sec->auth, u);
+            snprintf(c->group, sizeof(c->group), "%s", g ? g : "");
+            n = snprintf(resp, respcap, "OK authenticated as %s", u);
+        } else {
+            n = snprintf(resp, respcap, "ERR auth");
+        }
+        goto done;
+    }
+
+    /* AUTH GATE: everything below touches data; in secure mode it is refused
+     * until this connection has logged in. */
+    int is_data = (strcmp(cmd, "SET") == 0 || strcmp(cmd, "GET") == 0 ||
+                   strcmp(cmd, "DEL") == 0 || strcmp(cmd, "STATS") == 0);
+    if (sec && is_data && !c->authed) {
+        n = snprintf(resp, respcap, "ERR auth required"); goto done;
+    }
 
     if (strcmp(cmd, "STATS") == 0) {
         BPStats s = bp_stats(db->bp);
@@ -79,25 +173,38 @@ static size_t handle_command(Conn *c, const char *payload, uint32_t plen,
     if (strcmp(cmd, "SET") == 0 || strcmp(cmd, "GET") == 0 || strcmp(cmd, "DEL") == 0) {
         char *key = strtok_r(NULL, " ", &save);
         char *val = strtok_r(NULL, "", &save);           /* SET only */
+        char op   = (cmd[0] == 'G') ? 'r' : 'w';
 
         if (!key) { n = snprintf(resp, respcap, "ERR usage %s <key> ...", cmd); goto done; }
         if (strlen(key) > MAX_KEY) { n = snprintf(resp, respcap, "ERR key too long"); goto done; }
 
+        if (sec) {                                        /* permission gate */
+            char ns[64]; extract_ns(key, ns, sizeof(ns));
+            if (!perm_check(sec->perm, ns, c->user, c->group, op)) {
+                sec_audit(sec, c->user, cmd, key, "DENIED");
+                n = snprintf(resp, respcap, "ERR perm"); goto done;
+            }
+        }
+
+        const char *result = "OK";
         if (cmd[0] == 'S') {                              /* SET */
             if (!val) { n = snprintf(resp, respcap, "ERR usage SET <key> <value>"); goto done; }
             int rc = db_set(db, key, val, (uint32_t)strlen(val));
+            result = (rc == DK_OK) ? "OK" : (rc == DK_TOOBIG ? "ERR-size" : "ERR-io");
             n = snprintf(resp, respcap, "%s", rc == DK_OK ? "OK" :
                          rc == DK_TOOBIG ? "ERR value too large" : "ERR io");
         } else if (cmd[0] == 'G') {                       /* GET */
             static __thread char vbuf[PROTO_MAX_PAYLOAD];
             uint32_t vl = 0;
             int rc = db_get(db, key, vbuf, sizeof(vbuf), &vl);
-            if (rc == DK_OK) n = snprintf(resp, respcap, "OK %.*s", (int)vl, vbuf);
-            else             n = snprintf(resp, respcap, "ERR notfound");
+            if (rc == DK_OK) { n = snprintf(resp, respcap, "OK %.*s", (int)vl, vbuf); result = "OK"; }
+            else             { n = snprintf(resp, respcap, "ERR notfound"); result = "NOTFOUND"; }
         } else {                                          /* DEL */
             int rc = db_del(db, key);
             n = snprintf(resp, respcap, "%s", rc == DK_OK ? "OK" : "ERR notfound");
+            result = (rc == DK_OK) ? "OK" : "NOTFOUND";
         }
+        if (sec) sec_audit(sec, c->user, cmd, key, result);
         goto done;
     }
 
@@ -155,17 +262,20 @@ int server_run(const char *sock_path, DB *db, int nworkers)
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
+    SecCtx *sec = getenv("DURAKV_SECURE") ? sec_create() : NULL;
+
     int lfd = unix_listen(sock_path, 64);
-    if (lfd < 0) { perror("unix_listen"); return -1; }
+    if (lfd < 0) { perror("unix_listen"); sec_destroy(sec); return -1; }
 
     ThreadPool *tp = threadpool_create(nworkers, 128);
     fprintf(stderr,
             "\n  DuraKV server is ready.\n"
             "    socket : %s\n"
             "    workers: %d\n"
+            "    mode   : %s\n"
             "    connect with:  ./durakv-client %s\n"
             "    (press Ctrl-C to stop)\n\n",
-            sock_path, nworkers, sock_path);
+            sock_path, nworkers, sec ? "SECURE (login required)" : "open", sock_path);
 
     while (!g_stop) {
         int cfd = accept(lfd, NULL, NULL);
@@ -177,7 +287,7 @@ int server_run(const char *sock_path, DB *db, int nworkers)
         /* One heap Conn per client (freed by the worker); enqueue it so a pool
          * thread serves it while we go back to accepting the next connection. */
         Conn *c = calloc(1, sizeof(*c));
-        c->fd = cfd; c->db = db;
+        c->fd = cfd; c->db = db; c->sec = sec;
         threadpool_submit(tp, serve_connection, c);
     }
 
@@ -185,6 +295,7 @@ int server_run(const char *sock_path, DB *db, int nworkers)
     close(lfd);
     unlink(sock_path);
     threadpool_shutdown(tp);
+    sec_destroy(sec);
     return 0;
 }
 
@@ -194,7 +305,7 @@ int main(int argc, char **argv)
     if (argc < 2) {
         fprintf(stderr,
             "usage: %s <socket-path> [data.db] [wal.log] [workers]\n"
-            "  env: DURAKV_FRAMES=<n>  DURAKV_POLICY=fifo|lru\n", argv[0]);
+            "  env: DURAKV_FRAMES=<n>  DURAKV_POLICY=fifo|lru  DURAKV_SECURE=1\n", argv[0]);
         return 2;
     }
     const char *sock = argv[1];
@@ -207,7 +318,9 @@ int main(int argc, char **argv)
     size_t frames = fenv ? (size_t)strtoul(fenv, NULL, 10) : 64;
     PolicyKind pol = (penv && strcmp(penv, "fifo") == 0) ? POLICY_FIFO : POLICY_LRU;
 
-    DB *db = db_open_ex(data, wal, frames ? frames : 64, pol);
+    const char *pw = getenv("DURAKV_PASSWORD");
+    DB *db = pw ? db_open_secure(data, wal, frames ? frames : 64, pol, pw)
+                : db_open_ex(data, wal, frames ? frames : 64, pol);
     if (!db) { fprintf(stderr, "failed to open store\n"); return 1; }
 
     int rc = server_run(sock, db, workers);
