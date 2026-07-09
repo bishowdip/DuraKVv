@@ -1,5 +1,6 @@
-# DuraKV -- durable storage engine + in-RAM buffer pool. Only dependency so
-# far is pthreads (in libc), used by the buffer pool.
+# DuraKV -- durable storage engine, buffer pool, concurrency, AF_UNIX IPC and a
+# security layer. The core engine needs only pthreads (in libc); libsodium is
+# confined to the security demos below (crypto/auth) via SODIUM_CFLAGS/LIBS.
 
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -g -Iinclude -pthread
@@ -9,6 +10,12 @@ CORE    := src/storage.c src/wal.c src/recovery.c \
            src/bufferpool.c src/replacement.c \
            src/threadpool.c src/scheduler.c
 NET     := src/protocol.c
+SEC     := src/crypto.c src/auth.c src/permissions.c
+
+# libsodium (security layer only) -- located via Homebrew, fallback /usr/local
+SODIUM_PREFIX ?= $(shell brew --prefix libsodium 2>/dev/null || echo /usr/local)
+SODIUM_CFLAGS := -I$(SODIUM_PREFIX)/include
+SODIUM_LIBS   := -L$(SODIUM_PREFIX)/lib -lsodium
 
 .PHONY: all tests test crashtest crashtest_concurrent clean
 
@@ -26,7 +33,8 @@ durakv-client: $(NET) src/client.c
 
 # --- unit tests ----------------------------------------------------------
 tests: test_storage test_wal_recovery test_bufferpool test_belady mem_demo \
-       demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue
+       demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue \
+       file_demo demo_crypto demo_auth
 
 test_storage: $(CORE) tests/test_storage.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -42,6 +50,16 @@ test_belady: $(CORE) tests/test_belady.c
 
 mem_demo: tests/mem_demo.c
 	$(CC) $(CFLAGS) -o $@ $^
+
+file_demo: tests/file_demo.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+# --- security demos (need libsodium) -------------------------------------
+demo_crypto: src/crypto.c tests/demo_crypto.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(SODIUM_LIBS)
+
+demo_auth: src/crypto.c src/auth.c src/permissions.c tests/demo_auth.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(SODIUM_LIBS)
 
 # --- network/IPC tests ---------------------------------------------------
 test_ipc: $(CORE) $(NET) src/server.c tests/test_ipc.c
@@ -75,6 +93,9 @@ test: tests
 	@echo "== loadtest =="          && ./loadtest
 	@echo "== test_ipc =="          && ./test_ipc
 	@echo "== demo_mqueue =="       && ./demo_mqueue
+	@echo "== file_demo =="         && ./file_demo
+	@echo "== demo_crypto =="       && ./demo_crypto
+	@echo "== demo_auth =="         && ./demo_auth
 
 crashtest: durakv
 	./scripts/crashtest.sh
@@ -86,7 +107,7 @@ clean:
 	rm -f durakv durakv-server durakv-client
 	rm -f test_storage test_wal_recovery test_bufferpool test_belady mem_demo
 	rm -f *.sock /tmp/durakv_*.sock
-	rm -f demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue
+	rm -f demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue file_demo demo_crypto demo_auth
 	rm -f *.o
 	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log
 	rm -f /tmp/durakv_crash.out /tmp/durakv_crash.acked /tmp/durakv_recovery.db.snap
