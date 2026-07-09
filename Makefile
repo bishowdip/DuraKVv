@@ -22,8 +22,8 @@ SODIUM_LIBS   := -L$(SODIUM_PREFIX)/lib -lsodium
 
 all: durakv durakv-server durakv-client tests
 
-durakv: $(CORE) src/durakv.c
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+durakv: $(CORE) $(ENCSRC) src/durakv.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
 # --- network/IPC binaries (AF_UNIX) --------------------------------------
 durakv-server: $(CORE) $(NET) src/server.c
