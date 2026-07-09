@@ -55,7 +55,7 @@ static int ask(const char *prompt, char *buf, size_t cap)
  * feedback (so a non-technical user never has to type wire commands). */
 static void client_menu(int fd, const char *sock)
 {
-    char choice[64], key[1024];
+    char choice[64], key[1024], user[128], pass[128];
     static char val[1 << 16];
 
     printf("\n" C_CYAN C_BOLD "  DuraKV client" C_RESET
@@ -64,13 +64,14 @@ static void client_menu(int fd, const char *sock)
     for (;;) {
         printf("\n" C_BOLD "  What would you like to do?" C_RESET "\n");
         printf("    " C_GREEN "1" C_RESET ") Set a value     "
-               "    " C_GREEN "4" C_RESET ") Server stats\n");
+               "    " C_GREEN "4" C_RESET ") Log in (secure servers)\n");
         printf("    " C_GREEN "2" C_RESET ") Get a value     "
-               "    " C_GREEN "5" C_RESET ") Ping server\n");
+               "    " C_GREEN "5" C_RESET ") Server stats\n");
         printf("    " C_GREEN "3" C_RESET ") Delete a key    "
-               "    " C_GREEN "0" C_RESET ") Quit\n");
+               "    " C_GREEN "6" C_RESET ") Ping server\n");
+        printf("    " C_GREEN "0" C_RESET ") Quit\n");
 
-        if (!ask("\n  choose [0-5]: ", choice, sizeof(choice))) { printf("\n"); break; }
+        if (!ask("\n  choose [0-6]: ", choice, sizeof(choice))) { printf("\n"); break; }
         if (!*choice) continue;
 
         int rc = 0;
@@ -83,6 +84,10 @@ static void client_menu(int fd, const char *sock)
             if (!rc) {
                 if (!strcmp(g_resp, "OK"))
                     printf(C_GREEN "    \xE2\x9C\x93 stored\n" C_RESET);
+                else if (!strcmp(g_resp, "ERR perm"))
+                    printf(C_RED "    \xE2\x9C\x97 permission denied\n" C_RESET);
+                else if (!strcmp(g_resp, "ERR auth required"))
+                    printf(C_YEL "    please log in first (option 4)\n" C_RESET);
                 else printf("    %s\n", g_resp);
             }
         } else if (!strcmp(choice, "2") || !strcasecmp(choice, "get")) {
@@ -95,6 +100,8 @@ static void client_menu(int fd, const char *sock)
                     printf(C_GREEN "    \xE2\x9C\x93 %s = \"%s\"\n" C_RESET, key, g_resp + 3);
                 else if (!strcmp(g_resp, "ERR notfound"))
                     printf(C_YEL "    \xE2\x80\x94 \"%s\" not found\n" C_RESET, key);
+                else if (!strcmp(g_resp, "ERR auth required"))
+                    printf(C_YEL "    please log in first (option 4)\n" C_RESET);
                 else printf("    %s\n", g_resp);
             }
         } else if (!strcmp(choice, "3") || !strcasecmp(choice, "del")) {
@@ -105,10 +112,19 @@ static void client_menu(int fd, const char *sock)
             if (!rc) printf(!strcmp(g_resp, "OK")
                             ? C_GREEN "    \xE2\x9C\x93 deleted\n" C_RESET
                             : C_YEL  "    \xE2\x80\x94 %s\n" C_RESET, g_resp);
-        } else if (!strcmp(choice, "4") || !strcasecmp(choice, "stats")) {
+        } else if (!strcmp(choice, "4") || !strcasecmp(choice, "login")) {
+            if (!ask("    username: ", user, sizeof(user)) || !*user) continue;
+            if (!ask("    password: ", pass, sizeof(pass))) break;
+            char req[300];
+            snprintf(req, sizeof(req), "AUTH %s %s", user, pass);
+            rc = rpc(fd, req);
+            if (!rc) printf(!strncmp(g_resp, "OK", 2)
+                            ? C_GREEN "    \xE2\x9C\x93 logged in as %s\n" C_RESET
+                            : C_RED   "    \xE2\x9C\x97 login failed\n" C_RESET, user);
+        } else if (!strcmp(choice, "5") || !strcasecmp(choice, "stats")) {
             rc = rpc(fd, "STATS");
             if (!rc) printf("    %s\n", g_resp);
-        } else if (!strcmp(choice, "5") || !strcasecmp(choice, "ping")) {
+        } else if (!strcmp(choice, "6") || !strcasecmp(choice, "ping")) {
             rc = rpc(fd, "PING");
             if (!rc) printf(!strcmp(g_resp, "PONG")
                             ? C_GREEN "    \xE2\x9C\x93 server is alive\n" C_RESET
@@ -119,7 +135,7 @@ static void client_menu(int fd, const char *sock)
             printf(C_CYAN "  goodbye.\n" C_RESET);
             break;
         } else {
-            printf(C_RED "    please choose a number from 0 to 5\n" C_RESET);
+            printf(C_RED "    please choose a number from 0 to 6\n" C_RESET);
             continue;
         }
         if (rc) { printf(C_RED "  lost connection to server.\n" C_RESET); break; }
