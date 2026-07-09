@@ -34,7 +34,7 @@ durakv-client: $(NET) src/client.c
 
 # --- unit tests ----------------------------------------------------------
 tests: test_storage test_wal_recovery test_bufferpool test_belady mem_demo \
-       demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue \
+       demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue test_secure \
        file_demo demo_crypto demo_auth demo_audit demo_encrypt
 
 test_storage: $(CORE) tests/test_storage.c
@@ -72,6 +72,9 @@ demo_encrypt: $(CORE) $(ENCSRC) tests/demo_encrypt.c
 test_ipc: $(CORE) $(NET) $(SEC) src/encryption.c src/server.c tests/test_ipc.c
 	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -DDURAKV_SERVER_NO_MAIN -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
+test_secure: $(CORE) $(NET) $(SEC) src/encryption.c src/server.c tests/test_secure.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -DDURAKV_SERVER_NO_MAIN -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
+
 demo_mqueue: tests/demo_mqueue.c
 	$(CC) $(CFLAGS) -o $@ $^
 
@@ -99,6 +102,7 @@ test: tests
 	@echo "== demo_scheduler =="    && ./demo_scheduler
 	@echo "== loadtest =="          && ./loadtest
 	@echo "== test_ipc =="          && ./test_ipc
+	@echo "== test_secure =="       && ./test_secure
 	@echo "== demo_mqueue =="       && ./demo_mqueue
 	@echo "== file_demo =="         && ./file_demo
 	@echo "== demo_crypto =="       && ./demo_crypto
@@ -116,7 +120,7 @@ clean:
 	rm -f durakv durakv-server durakv-client
 	rm -f test_storage test_wal_recovery test_bufferpool test_belady mem_demo
 	rm -f *.sock /tmp/durakv_*.sock
-	rm -f demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue file_demo demo_crypto demo_auth demo_audit demo_encrypt
+	rm -f demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue file_demo test_secure demo_crypto demo_auth demo_audit demo_encrypt
 	rm -f *.o
 	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log
 	rm -f /tmp/durakv_crash.out /tmp/durakv_crash.acked /tmp/durakv_recovery.db.snap
