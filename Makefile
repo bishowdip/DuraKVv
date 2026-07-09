@@ -11,6 +11,7 @@ CORE    := src/storage.c src/wal.c src/recovery.c \
            src/threadpool.c src/scheduler.c
 NET     := src/protocol.c
 SEC     := src/crypto.c src/auth.c src/permissions.c src/audit.c
+ENCSRC  := src/crypto.c src/encryption.c          # encryption-at-rest codec
 
 # libsodium (security layer only) -- located via Homebrew, fallback /usr/local
 SODIUM_PREFIX ?= $(shell brew --prefix libsodium 2>/dev/null || echo /usr/local)
@@ -34,7 +35,7 @@ durakv-client: $(NET) src/client.c
 # --- unit tests ----------------------------------------------------------
 tests: test_storage test_wal_recovery test_bufferpool test_belady mem_demo \
        demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue \
-       file_demo demo_crypto demo_auth demo_audit
+       file_demo demo_crypto demo_auth demo_audit demo_encrypt
 
 test_storage: $(CORE) tests/test_storage.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -63,6 +64,9 @@ demo_auth: src/crypto.c src/auth.c src/permissions.c tests/demo_auth.c
 
 demo_audit: src/audit.c tests/demo_audit.c
 	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(SODIUM_LIBS)
+
+demo_encrypt: $(CORE) $(ENCSRC) tests/demo_encrypt.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
 # --- network/IPC tests ---------------------------------------------------
 test_ipc: $(CORE) $(NET) src/server.c tests/test_ipc.c
@@ -100,6 +104,7 @@ test: tests
 	@echo "== demo_crypto =="       && ./demo_crypto
 	@echo "== demo_auth =="         && ./demo_auth
 	@echo "== demo_audit =="        && ./demo_audit
+	@echo "== demo_encrypt =="      && ./demo_encrypt
 
 crashtest: durakv
 	./scripts/crashtest.sh
@@ -111,7 +116,7 @@ clean:
 	rm -f durakv durakv-server durakv-client
 	rm -f test_storage test_wal_recovery test_bufferpool test_belady mem_demo
 	rm -f *.sock /tmp/durakv_*.sock
-	rm -f demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue file_demo demo_crypto demo_auth demo_audit
+	rm -f demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue file_demo demo_crypto demo_auth demo_audit demo_encrypt
 	rm -f *.o
 	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log
 	rm -f /tmp/durakv_crash.out /tmp/durakv_crash.acked /tmp/durakv_recovery.db.snap
