@@ -18,7 +18,7 @@ SODIUM_PREFIX ?= $(shell brew --prefix libsodium 2>/dev/null || echo /usr/local)
 SODIUM_CFLAGS := -I$(SODIUM_PREFIX)/include
 SODIUM_LIBS   := -L$(SODIUM_PREFIX)/lib -lsodium
 
-.PHONY: all tests test crashtest crashtest_concurrent clean
+.PHONY: all tests test demo crashtest crashtest_concurrent clean
 
 all: durakv durakv-server durakv-client durakv-web tests
 
@@ -115,6 +115,9 @@ test: tests
 	@echo "== demo_auth =="         && ./demo_auth
 	@echo "== demo_audit =="        && ./demo_audit
 	@echo "== demo_encrypt =="      && ./demo_encrypt
+
+demo: tests
+	./scripts/run_demo.sh
 
 crashtest: durakv
 	./scripts/crashtest.sh
