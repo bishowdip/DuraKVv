@@ -1,13 +1,7 @@
 /*
- * scheduler.h -- Round-robin dispatcher across per-client queues (Phase 3).
- *
- * OS/systems primitive: round-robin scheduling, fairness / anti-starvation.
- *
- * Instead of one FCFS queue (where one heavy client can monopolise service),
- * each client has its own queue. scheduler_next() services exactly one request
- * from the current client, then rotates to the next non-empty client. A client
- * that floods the system therefore cannot starve the others -- demonstrable
- * fairness, not a toy.
+ * scheduler.h - round robin over per-client queues. one request per client
+ * per turn, cursor rotates past whoever was just served -- so a heavy
+ * client cannot starve the light ones (unlike a single FCFS queue).
  */
 #ifndef DURAKV_SCHEDULER_H
 #define DURAKV_SCHEDULER_H

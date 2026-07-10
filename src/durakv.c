@@ -1,17 +1,9 @@
 /*
- * durakv.c -- command-line front end for the durable KV store.
- *
- * Usage:
- *   durakv <data.db> <wal.log>                 interactive use
- *   durakv <data.db> <wal.log> stress N START  commit N sequential keys
- *
- * Raw commands (one per line): set <k> <v...> | get <k> | del <k> | list |
- * checkpoint | quit. Piped/scripted input is driven through this parser, so
- * crashtest.sh and the demos behave predictably.
- *
- * In stress mode each committed key is printed as "COMMIT <key>" and flushed
- * *after* its WAL fsync, so anything the harness sees on stdout is guaranteed
- * durable -- exactly the contract crashtest.sh relies on.
+ * durakv.c - cli front end.
+ *   durakv <data.db> <wal.log>                    menu (tty) or raw parser (pipe)
+ *   durakv <data.db> <wal.log> stress N START [T] commit N keys, T threads
+ * stress prints "COMMIT <key>" only AFTER the WAL fsync, so whatever the
+ * crashtest sees on stdout is guaranteed durable. thats the whole contract.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "storage.h"
@@ -28,9 +20,7 @@ static pthread_mutex_t g_print_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct { DB *db; long start, count, threads, tid; } StressArg;
 
-/* One stress worker: commits its stripe of the key range. Each committed key is
- * announced on stdout only after db_set has fsync'd its WAL, so the crashtest
- * can trust that every "COMMIT" line it reads is already durable. */
+/* one stress worker commits its stripe of the key range. */
 static void *stress_worker(void *arg)
 {
     StressArg *a = arg;
@@ -64,9 +54,8 @@ static void run_stress(DB *db, long count, long start, long threads)
     free(args); free(th);
 }
 
-/* Raw line-command interpreter for piped/scripted input (set/get/del/list/
- * checkpoint/quit), one command per line. Kept deliberately simple and stable
- * because crashtest.sh and the demos drive the CLI through this path. */
+/* raw line commands for pipes/scripts (set/get/del/list/stats/checkpoint/
+ * quit). crashtest.sh drives this path, keep it stable. */
 static void run_interactive(DB *db)
 {
     char line[1 << 20];          /* generous: keys + values on one line */

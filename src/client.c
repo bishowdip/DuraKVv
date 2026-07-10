@@ -1,9 +1,6 @@
 /*
- * client.c -- AF_UNIX client for DuraKV (Phase 4).
- *
- * From a terminal it shows a friendly guided menu. With piped input it falls
- * back to a raw request/response loop (one line per request), so scripts and
- * tests are unaffected.
+ * client.c - af_unix client. human at a terminal gets the menu, piped
+ * input gets the raw one-line-per-request loop so scripts/tests just work.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "protocol.h"
@@ -26,9 +23,8 @@
 /* Holds the most recent server reply (NUL-terminated) for the caller to inspect. */
 static char g_resp[PROTO_MAX_PAYLOAD];
 
-/* One round-trip of the request/response protocol: frame the request, read the
- * framed reply, NUL-terminate it. Returns 0 on success, -1 if the connection
- * was lost. This is the single point every command goes through. */
+/* one round trip: frame the request, read the framed reply. every command
+ * goes through here. -1 = connection lost. */
 static int rpc(int fd, const char *req)
 {
     if (frame_write(fd, req, (uint32_t)strlen(req)) != 0) return -1;
@@ -50,9 +46,7 @@ static int ask(const char *prompt, char *buf, size_t cap)
 
 /* ---- friendly menu (terminal) ----------------------------------------- */
 
-/* Interactive front-end: a numbered menu that turns each choice into a protocol
- * command via rpc() and translates the raw reply into friendly, colour-coded
- * feedback (so a non-technical user never has to type wire commands). */
+/* numbered menu -> wire command -> friendly coloured feedback. */
 static void client_menu(int fd, const char *sock)
 {
     char choice[64], key[1024], user[128], pass[128];
@@ -144,9 +138,7 @@ static void client_menu(int fd, const char *sock)
 
 /* ---- raw loop (piped input) ------------------------------------------- */
 
-/* Non-interactive front-end: read one wire command per line from stdin and echo
- * each reply. This keeps scripts and the automated tests (which pipe commands
- * in) working unchanged, independent of the menu. */
+/* piped mode: one wire command per line, echo each reply. */
 static void client_raw(int fd)
 {
     char *line = NULL; size_t cap = 0;

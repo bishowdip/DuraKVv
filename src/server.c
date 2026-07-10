@@ -1,12 +1,8 @@
 /*
- * server.c -- AF_UNIX server: parse, validate, dispatch commands to the store,
- * one worker per connection. See include/server.h.
- *
- * Security is opt-in via the DURAKV_SECURE environment variable. When enabled,
- * a connection must AUTH before issuing data commands, every SET/GET/DEL is
- * checked against the caller's rwx permission on the key's namespace, and every
- * attempt is written to the hash-chained audit log. When disabled the server
- * runs "open" (used by the plain IPC test).
+ * server.c - af_unix server, one pool worker per connection.
+ * DURAKV_SECURE=1 turns on the security gate: AUTH before data commands,
+ * rwx check on every key's namespace, every attempt (allowed or DENIED)
+ * appended to the hash-chained audit log. without it the server runs open.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "server.h"
@@ -28,11 +24,8 @@
 
 #define MAX_KEY 256
 
-/* Set by SIGINT/SIGTERM to request a clean shutdown of the accept loop.
- * `volatile sig_atomic_t` is the only type the C standard allows a handler to
- * touch safely: volatile stops the compiler caching it, sig_atomic_t guarantees
- * the write is atomic w.r.t. interruption. The handler does the minimum -- just
- * flips the flag -- and the main loop notices it. */
+/* SIGINT/SIGTERM -> clean shutdown. volatile sig_atomic_t is the only type
+ * a signal handler may touch safely; the handler just flips the flag. */
 static volatile sig_atomic_t g_stop = 0;
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
 
@@ -108,14 +101,9 @@ typedef struct {
 
 /* ---- command dispatch -------------------------------------------------- */
 
-/*
- * Parse and execute one text command, writing the reply into `resp` and
- * returning its length. This is where the protocol's verbs live (PING/AUTH/
- * SET/GET/DEL/STATS/QUIT) and, in secure mode, where the AUTH gate and per-key
- * permission checks are enforced before any data is touched. Every recognised
- * data command produces exactly one response line, so the protocol stays a
- * simple request/response.
- */
+/* parse + run one command (PING/AUTH/SET/GET/DEL/STATS/QUIT). in secure
+ * mode the auth gate and permission checks happen here, before any data is
+ * touched. one command in, one reply out. */
 static size_t handle_command(Conn *c, const char *payload, uint32_t plen,
                              char *resp, size_t respcap)
 {
@@ -152,8 +140,7 @@ static size_t handle_command(Conn *c, const char *payload, uint32_t plen,
         goto done;
     }
 
-    /* AUTH GATE: everything below touches data; in secure mode it is refused
-     * until this connection has logged in. */
+    /* auth gate: everything below touches data, refuse until logged in */
     int is_data = (strcmp(cmd, "SET") == 0 || strcmp(cmd, "GET") == 0 ||
                    strcmp(cmd, "DEL") == 0 || strcmp(cmd, "STATS") == 0);
     if (sec && is_data && !c->authed) {
@@ -217,14 +204,9 @@ done:
 
 /* ---- per-connection session (runs on a worker thread) ------------------ */
 
-/*
- * Handle one client for its whole lifetime. Runs as a thread-pool job, so many
- * connections are served concurrently. Loops read-a-frame -> execute ->
- * write-a-reply until the client QUITs, disconnects, or sends a bad frame; then
- * closes the socket and frees its state. The req/resp buffers are `__thread`
- * (thread-local) so each worker has its own -- sharing one static buffer across
- * concurrent connections would be a data race.
- */
+/* one client, whole lifetime, running as a pool job. read frame -> execute
+ * -> reply, until QUIT/disconnect/bad frame. buffers are __thread so each
+ * worker has its own (sharing one static buffer would be a data race). */
 static void serve_connection(void *arg)
 {
     Conn *c = arg;
@@ -247,15 +229,11 @@ static void serve_connection(void *arg)
 
 /* ---- accept loop ------------------------------------------------------- */
 
-/*
- * The server main loop: set up signals, open the socket and thread pool, then
- * accept connections forever, handing each to a worker. Returns 0 after a clean
- * shutdown (triggered by SIGINT/SIGTERM).
- */
+/* main loop: signals, socket, pool, then accept forever handing each
+ * connection to a worker. returns 0 on clean shutdown. */
 int server_run(const char *sock_path, DB *db, int nworkers)
 {
-    /* Ignore SIGPIPE so a client that vanishes mid-reply kills the write with
-     * an EPIPE error we can handle, not a signal that would kill the server. */
+    /* ignore SIGPIPE: a vanished client should give EPIPE, not kill us */
     signal(SIGPIPE, SIG_IGN);
     struct sigaction sa = {0};
     sa.sa_handler = on_signal;
