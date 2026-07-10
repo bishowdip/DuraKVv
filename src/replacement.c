@@ -1,29 +1,9 @@
 /*
- * replacement.c -- page-replacement policies (Task 2) behind a small vtable.
- *
- * When the buffer pool is full and a new page must be loaded, a *victim* frame
- * has to be evicted. This file provides the eviction policy; the pool itself
- * (bufferpool.c) owns the frames. Two policies ship:
- *
- *   FIFO -- evict the frame loaded earliest, regardless of later use.
- *   LRU  -- evict the frame not used for the longest time.
- *
- * Both are implemented with a single mechanism: a monotonic logical "clock"
- * and a per-frame `stamp`. The victim is always the frame with the SMALLEST
- * (oldest) stamp. The ONLY difference between the policies is when a frame is
- * re-stamped:
- *   - FIFO stamps a frame once, when it is loaded  -> order = load order.
- *   - LRU  stamps a frame on load AND on every hit -> order = recency of use.
- *
- * Why this matters for the marks: LRU is a "stack algorithm" -- the set of
- * pages it keeps with k frames is always a subset of what it keeps with k+1
- * frames, so giving it more memory can never increase faults. FIFO is NOT a
- * stack algorithm, which is exactly why it can suffer Belady's anomaly (more
- * frames -> MORE faults); see tests/test_belady.c for the demonstration.
- *
- * A function-pointer vtable (the Policy struct) keeps the two policies
- * interchangeable and makes adding CLOCK or LRU-K a matter of one more table
- * entry, with no change to the buffer pool. See include/replacement.h.
+ * replacement.c - FIFO and LRU with ONE mechanism: a logical clock + a
+ * per-frame stamp, victim = smallest stamp. only difference is when we
+ * re-stamp: FIFO on load only, LRU on load AND every hit. LRU is a stack
+ * algorithm (more frames never = more faults), FIFO isnt -- thats exactly
+ * why FIFO can hit belady's anomaly (see tests/test_belady.c).
  */
 #include "replacement.h"
 
@@ -86,9 +66,7 @@ void replacer_note_access(Replacer *r, size_t f) { r->pol->note_access(r, f); }
 /* Frame emptied (page removed): stamp 0 excludes it from victim selection. */
 void replacer_note_free  (Replacer *r, size_t f) { r->stamp[f] = 0; }
 
-/* The victim is the evictable frame with the smallest (oldest) stamp.
- * Under FIFO that is the earliest-loaded page; under LRU the least-recently
- * used -- the only difference is whether accesses re-stamp the frame. */
+/* victim = evictable frame with the oldest stamp. */
 int replacer_victim(Replacer *r, const unsigned char *evictable, size_t *out)
 {
     int found = 0;

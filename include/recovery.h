@@ -1,17 +1,8 @@
 /*
- * recovery.h -- Crash recovery (DuraKV Phase 1).
- *
- * OS/systems primitive: crash recovery (a simplified ARIES).
- *
- * On startup, recovery_run() performs three passes over the WAL:
- *   1. Analysis -- from the last CHECKPOINT, determine which transactions
- *      committed and which were in-flight (losers).
- *   2. Redo     -- re-apply each committed after-image, but only if
- *      page.page_lsn < record.lsn. This comparison makes redo idempotent,
- *      so crashing *during* recovery is itself safe.
- *   3. Undo     -- roll back losers by applying before-images in reverse.
- *
- * It also restores db->next_lsn and db->next_txn from the log.
+ * recovery.h - crash recovery (simplified ARIES). three passes on open:
+ * analysis (who committed since the last checkpoint), redo (re-apply
+ * committed after-images, only where page_lsn < record lsn -> idempotent),
+ * undo (roll losers back with before-images). also restores next_lsn/txn.
  */
 #ifndef DURAKV_RECOVERY_H
 #define DURAKV_RECOVERY_H

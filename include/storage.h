@@ -1,15 +1,8 @@
 /*
- * storage.h -- Page file + slotted-page key/value storage (DuraKV Phase 1).
- *
- * OS/systems primitive: file I/O, on-disk data structures (slotted pages).
- *
- * The page file (data.db) is an array of fixed-size pages:
- *   - page 0 is the immutable header page (magic / version / page_size).
- *   - pages 1..N-1 are slotted data pages holding {key,value} records.
- *
- * Durability comes from the write-ahead log (see wal.h): every mutation is
- * logged and fsync'd before its data pages are written back. Crash recovery
- * (replaying the log) is the next layer up.
+ * storage.h - page file + slotted-page key/value storage.
+ * page 0 = header (magic/version/page size), pages 1..N-1 = slotted data
+ * pages holding {key,value} records. durability = WAL first (wal.h), data
+ * pages after; recovery replays the log on open.
  */
 #ifndef DURAKV_STORAGE_H
 #define DURAKV_STORAGE_H
@@ -45,12 +38,10 @@ typedef struct __attribute__((packed)) {
 /* Largest record that fits in an empty page (one header + one slot). */
 #define MAX_RECORD (PAGE_SIZE - (int)sizeof(PageHeader) - (int)sizeof(Slot))
 
-/* ---- optional encryption-at-rest codec --------------------------------- *
- * A pluggable AEAD codec. When a DB has one, every page written to data.db and
- * every page image logged to the WAL is sealed; reads/recovery unseal. The
- * implementation (src/encryption.c) is the only place that touches libsodium,
- * so storage.c / recovery.c stay dependency-free -- they only call through
- * these function pointers. */
+/* ---- optional encryption-at-rest codec ---------------------------------
+ * when a DB has one, every page to data.db and every WAL page image gets
+ * sealed. only encryption.c touches libsodium -- storage/recovery just call
+ * these function pointers, so the core stays dependency free. */
 #define DURAKV_SALT_LEN 16
 
 typedef struct PageCodec {

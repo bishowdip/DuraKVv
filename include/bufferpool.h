@@ -1,18 +1,9 @@
 /*
- * bufferpool.h -- In-RAM page cache over the data file (DuraKV Phase 2).
- *
- * OS/systems primitive: paging / virtual-memory buffer management.
- *
- * A fixed set of frames caches pages from data.db. Callers pin a page (a page
- * fault loads it, possibly evicting a victim chosen by the replacement policy)
- * and unpin it when done, declaring whether they dirtied it. Dirty frames are
- * written back lazily -- on eviction, or in bulk via bp_flush_all().
- *
- * Write-back + the WAL together honour the write-ahead invariant: because the
- * storage engine only dirties a page *after* its commit has been fsync'd to
- * the WAL, any page the pool later flushes already has a durable log record.
- * (And because dirty pages live only in this process's RAM, a kill -9 really
- * does lose them -- so recovery's redo pass is exercised for real.)
+ * bufferpool.h - fixed set of in-ram frames caching pages from data.db.
+ * pin a page (fault loads it, maybe evicting a victim via the policy),
+ * unpin with dirty=1 if you changed it. write-back: dirty frames only hit
+ * disk on eviction / flush_all. since dirty pages live in OUR ram, kill -9
+ * really loses them -- which is what makes the redo test honest.
  */
 #ifndef DURAKV_BUFFERPOOL_H
 #define DURAKV_BUFFERPOOL_H
