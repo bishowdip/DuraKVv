@@ -1,21 +1,11 @@
 /*
- * audit.c -- a tamper-EVIDENT audit log (Task 3), recording every security-
- * relevant action (who did what to which key, and whether it was allowed).
- *
- * The log is append-only, but append-only alone does not stop someone with file
- * access from editing or deleting a past line. The defence is a HASH CHAIN
- * (the same idea a blockchain uses): each entry stores
- *      hash = SHA-256( previous_entry_hash || this_entry's_fields )
- * so every entry cryptographically commits to the entire history before it.
- * Altering, reordering, or removing any past entry changes its hash, which no
- * longer matches the `prev` recorded in the next entry -- so audit_verify()
- * detects the break and reports the exact sequence number where it occurs. The
- * chain starts from a fixed all-zero "genesis" hash.
- *
- * This makes the log tamper-EVIDENT, not tamper-PROOF: an attacker who can
- * rewrite the whole file could recompute every hash forward. Defeating that
- * needs an external anchor (e.g. periodically signing or off-siting the tip) --
- * noted as a limitation, not implemented here. See include/audit.h.
+ * audit.c - who did what to which key, and was it allowed. append-only
+ * isnt enough (someone with file access can edit a line), so each entry
+ * hashes the one before it -- same idea as a blockchain. change anything
+ * in the past and the chain snaps at that exact seq, audit_verify points
+ * at it. tamper EVIDENT not tamper PROOF: rewriting the whole file and
+ * recomputing every hash would still work, youd need an external anchor
+ * for that. known limitation.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "audit.h"
@@ -52,10 +42,8 @@ static void chain_hash(uint8_t out[HASHLEN], const uint8_t prev[HASHLEN],
     crypto_hash_sha256_final(&st, out);
 }
 
-/* Open (or create) an audit log for appending. If the file already exists, the
- * chain tip -- the last sequence number and last hash -- is recovered by
- * scanning it, so new entries continue the existing chain rather than starting
- * a fresh one. */
+/* open for appending. existing file -> scan it to recover the chain tip so
+ * new entries continue the chain instead of restarting it. */
 Audit *audit_open(const char *path)
 {
     if (sodium_init() < 0) return NULL;
@@ -96,8 +84,7 @@ void audit_close(Audit *a)
     free(a);
 }
 
-/* Append one entry, linking it into the hash chain and flushing to disk so the
- * record survives a crash immediately after the action. Returns 0 on success. */
+/* append one entry into the chain + flush right away. */
 int audit_append(Audit *a, const char *user, const char *op,
                  const char *key, const char *result)
 {
@@ -124,10 +111,8 @@ int audit_append(Audit *a, const char *user, const char *op,
     return 0;
 }
 
-/* Re-walk the whole log from genesis, recomputing each entry's hash and
- * checking it against the stored `prev`/hash fields. Returns 0 if the chain is
- * intact, or -1 and sets *bad_seq to the sequence number of the first broken
- * entry -- pinpointing exactly where tampering occurred. */
+/* re-walk from genesis recomputing every hash. 0 = intact, -1 = broken and
+ * *bad_seq says exactly which entry. */
 int audit_verify(const char *path, long *bad_seq)
 {
     FILE *r = fopen(path, "r");

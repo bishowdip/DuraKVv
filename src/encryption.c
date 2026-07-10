@@ -1,11 +1,8 @@
 /*
- * encryption.c -- encryption-at-rest codec for the storage engine (Phase 5).
- *
- * Builds a PageCodec (XChaCha20-Poly1305 via crypto.c) whose key is derived
- * from a password and the data file's KDF salt, then opens the DB with it.
- * This is the only file that links the storage engine to libsodium; storage.c
- * and recovery.c stay dependency-free and call through the codec's function
- * pointers. See include/storage.h (PageCodec) and include/crypto.h.
+ * encryption.c - builds the encryption-at-rest PageCodec (key derived from
+ * password + the salt in the db header) and opens the db with it. this is
+ * the ONLY file linking the engine to libsodium -- storage/recovery just
+ * call the codec's function pointers.
  */
 #include "storage.h"
 #include "crypto.h"
@@ -29,11 +26,8 @@ static void enc_free(void *ctx)
     if (ctx) { sodium_memzero(ctx, sizeof(EncCtx)); free(ctx); }
 }
 
-/* Open a database with encryption at rest. Derives the page-encryption key from
- * the master password and the data file's salt, wires up the codec, and hands
- * it to the generic db_open_full so every page and WAL image is sealed/unsealed
- * transparently. The wrong password simply derives the wrong key, so pages fail
- * AEAD verification and no data is exposed. */
+/* open with encryption at rest. wrong password just derives the wrong key,
+ * pages fail AEAD verification, nothing is exposed and nothing corrupts. */
 DB *db_open_secure(const char *data_path, const char *wal_path,
                    size_t nframes, PolicyKind policy, const char *password)
 {

@@ -1,15 +1,8 @@
 /*
- * audit.h -- append-only, hash-chained audit log (DuraKV Phase 5).
- *
- * OS/systems primitive: tamper-evident logging via a hash chain.
- *
- * Each entry stores hash = SHA-256(prev_hash || entry_fields). Because every
- * entry's hash depends on the one before it, altering or deleting any past
- * entry breaks the chain from that point on -- which audit_verify() detects.
- * (Genesis prev_hash is 32 zero bytes.)
- *
- * On-disk line (tab-separated):
- *   seq  timestamp  user  op  key  result  prev_hash_hex  hash_hex
+ * audit.h - append-only hash-chained log. each entry stores
+ * hash = sha256(prev_hash || fields), so editing/deleting any past entry
+ * breaks the chain from there on and audit_verify catches it.
+ * line format (tab separated): seq ts user op key result prev_hex hash_hex
  */
 #ifndef DURAKV_AUDIT_H
 #define DURAKV_AUDIT_H

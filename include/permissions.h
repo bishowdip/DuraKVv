@@ -1,12 +1,7 @@
 /*
- * permissions.h -- POSIX-style rwx access control for key namespaces (Phase 5).
- *
- * OS/systems primitive: access control (owner / group / other, rwx).
- *
- * Keys live in namespaces (the prefix before ':', e.g. "users:alice"). Each
- * namespace has an owner, a group, and a 3-octal-digit mode exactly like a
- * Unix file: owner bits, group bits, other bits, each r=4 w=2 x=1. Every
- * read/write is checked against the caller's identity.
+ * permissions.h - unix-style rwx on key namespaces (prefix before ':').
+ * each namespace = owner + group + 3-octal-digit mode, exactly like a file:
+ * r=4 w=2 x=1 per triad. every read/write gets checked.
  */
 #ifndef DURAKV_PERMISSIONS_H
 #define DURAKV_PERMISSIONS_H
