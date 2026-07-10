@@ -1,16 +1,9 @@
 /*
- * demo_mqueue.c -- inter-process "message sharing" with a System V message
- * queue (Task 4 IPC).
- *
- * OS/systems primitive: message-queue IPC (msgget / msgsnd / msgrcv).
- *
- * Unlike a byte-stream socket, a message queue preserves message *boundaries*
- * and lets the receiver pick messages by TYPE. A parent and a forked child
- * share one kernel queue: the child sends, the parent receives. We also show
- * type-selective receive (pull the "priority" type 2 ahead of type 1).
- *
- * System V IPC is used (not POSIX mq_*) because it is available on both macOS
- * and Linux; macOS does not implement POSIX message queues.
+ * demo_mqueue.c - message sharing between parent and forked child via a
+ * system V queue (msgget/msgsnd/msgrcv). unlike a byte stream it keeps
+ * message boundaries and lets you receive by TYPE -- we pull the priority
+ * message first even though it was sent last. sysv not posix mq_* because
+ * macos doesnt implement the posix ones.
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>

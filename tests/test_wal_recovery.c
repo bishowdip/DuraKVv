@@ -1,20 +1,8 @@
 /*
- * test_wal_recovery.c -- proves crash recovery's REDO pass reconstructs
- * committed data, using an honest power-loss model.
- *
- * Power loss does not erase writes retroactively; it loses whatever was in
- * the OS/disk cache but not yet forced to the platter. We reproduce that
- * deterministically:
- *
- *   1. Open a fresh store and snapshot data.db -- this is the last state the
- *      data file was fsync'd to (just the header page).
- *   2. SET many keys normally. The data pages are written (so each later
- *      transaction reads the accumulated page and logs a correct after-image)
- *      and every COMMIT is fsync'd to the WAL.
- *   3. Simulate power loss: clobber data.db with the snapshot, discarding all
- *      the unsynced data-page writes. The WAL -- which IS durable -- is kept.
- *   4. Reopen. data.db knows nothing; the keys can only come back if recovery
- *      redid them from the WAL. Verify every one.
+ * test_wal_recovery.c - honest power-loss model for the redo pass.
+ * 1. snapshot a fresh data.db  2. SET 500 keys (WAL fsync'd every commit)
+ * 3. clobber data.db back to the snapshot = power loss ate the data pages
+ * 4. reopen -> the keys can ONLY come back via redo from the WAL. check all.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "storage.h"

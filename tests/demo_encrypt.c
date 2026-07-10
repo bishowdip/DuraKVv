@@ -1,11 +1,7 @@
 /*
- * demo_encrypt.c -- encryption at rest (Task 3).
- *
- * Writes secrets to an encrypted store, then proves:
- *   1. neither data.db nor wal.log contains the plaintext on disk;
- *   2. reopening with the CORRECT password recovers the data;
- *   3. reopening with the WRONG password yields nothing (data inaccessible),
- *      and does not corrupt the store.
+ * demo_encrypt.c - encryption at rest: 1. plaintext appears in NEITHER
+ * data.db nor wal.log  2. right password gets the data back  3. wrong
+ * password gets nothing and corrupts nothing.
  */
 #include "storage.h"
 

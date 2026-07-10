@@ -1,7 +1,4 @@
-/*
- * test_storage.c -- record round-trips, update/delete semantics, multi-page
- * growth, and persistence across a clean close+reopen.
- */
+/* test_storage.c - round trips, update/delete, multi-page growth, reopen. */
 #include "storage.h"
 
 #include <assert.h>

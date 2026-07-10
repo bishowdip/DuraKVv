@@ -1,17 +1,8 @@
 /*
- * demo_race.c -- a data race made visible, then fixed three ways.
- *
- * OS/systems primitive: race conditions, atomicity, why unsynchronised
- * read-modify-write loses updates.
- *
- * Many threads each add 1 to a shared counter NITER times. The correct total
- * is NTHREADS * NITER. We run it:
- *   1. unsynchronised   -> total is short (updates were lost)
- *   2. mutex-protected   -> total is exact
- *   3. C11 _Atomic       -> total is exact, lock-free
- *
- * The read-modify-write is deliberately split (read; yield; write) to widen
- * the race window so the loss is reliably observable.
+ * demo_race.c - 8 threads x 20000 increments, three ways:
+ * no lock (loses updates), mutex (exact), C11 _Atomic (exact, lock free).
+ * the racy version splits read;yield;write to widen the window so the loss
+ * shows up every run.
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>

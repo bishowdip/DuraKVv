@@ -1,17 +1,8 @@
 /*
- * mem_demo.c -- a deliberately simple, pointer-level demonstration of paging
- * and FIFO page replacement (Task 2, the "literal" version).
- *
- * This complements the full buffer pool (src/bufferpool.c). Here everything is
- * explicit and visible:
- *   - physical memory is a small array of frames, each an int (4 bytes);
- *   - the workload is a "reference string" -- an array of page numbers;
- *   - pages are read/written THROUGH POINTERS and dereferenced;
- *   - when memory is full, FIFO chooses the victim;
- *   - the buffer (frame contents) is printed after every reference.
- *
- * It prints page faults vs hits and the final hit ratio, so the mechanics of
- * paging are laid bare for the report.
+ * mem_demo.c - paging at pointer level, everything visible: frames are an
+ * int array, pages are read/written through dereferenced pointers, FIFO
+ * picks the victim, buffer printed after every reference. the simple
+ * version of what bufferpool.c does properly.
  */
 #include <stdio.h>
 #include <stddef.h>

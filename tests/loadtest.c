@@ -1,12 +1,6 @@
 /*
- * loadtest.c -- many concurrent clients driving the real store through the
- * thread pool, proving the storage engine is correct under concurrent load.
- *
- * Each "client" is a job that performs NOPS SET operations on its own key
- * namespace. Workers run them in parallel. Afterwards the main thread reads
- * every key back and checks the value -- if any update were lost or any page
- * corrupted by a race, this fails. Per-client durations are reported to show
- * the work was spread fairly across workers.
+ * loadtest.c - 16 clients x 120 SETs through the pool in parallel, then
+ * read every key back. a lost update or a raced page = assert fails.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "storage.h"

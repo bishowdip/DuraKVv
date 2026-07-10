@@ -1,14 +1,8 @@
 /*
- * file_demo.c -- POSIX file creation, permissions (rwx) and access control
- * (Task 3, the literal 3.1.1 - 3.1.3).
- *
- * OS/systems primitive: file I/O and the POSIX permission model
- * (owner / group / other, each with read-write-execute bits), demonstrated
- * with open(), chmod(), access(), and the kernel's enforcement of those bits
- * on open().
- *
- * The file is left on disk afterwards so it can also be inspected by hand
- * (`ls -l`, `cat`, `nano`) -- exactly the manual check the brief describes.
+ * file_demo.c - the literal posix permission demo: create with a mode,
+ * chmod, access(), and the kernel refusing a write to a 0444 file.
+ * the file is left on disk so you can check by hand (ls -l, cat, nano)
+ * like the brief asks.
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>

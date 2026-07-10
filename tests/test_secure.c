@@ -1,13 +1,8 @@
 /*
- * test_secure.c -- end-to-end test of the SECURE server: authentication gate,
- * namespace rwx permission enforcement, and an intact audit chain.
- *
- * The forked server runs with DURAKV_SECURE=1. Clients then prove:
- *   - data commands are refused before AUTH;
- *   - alice (owner of "alice", mode 0640) can read+write it;
- *   - bob (group staff) can READ alice's namespace but not WRITE it;
- *   - a wrong password is rejected;
- *   - the audit log of all this verifies cleanly (hash chain intact).
+ * test_secure.c - the secure server end to end (DURAKV_SECURE=1):
+ * data refused before AUTH, alice rw on her namespace, bob (group) can
+ * read hers but not write, wrong password rejected, and the audit log of
+ * all of it verifies clean.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "server.h"

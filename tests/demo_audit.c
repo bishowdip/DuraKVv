@@ -1,10 +1,7 @@
 /*
- * demo_audit.c -- tamper-evident audit logging (Task 3).
- *
- * Appends a few events, verifies the hash chain is intact, then edits one
- * byte of a past entry directly on disk and shows that audit_verify() detects
- * the break and points to the offending entry. This is the property that makes
- * the log trustworthy: you cannot quietly rewrite history.
+ * demo_audit.c - append 3 entries, verify intact, then flip one byte of a
+ * past entry on disk -- verify must break and point at that exact entry.
+ * you cant quietly rewrite history.
  */
 #include "audit.h"
 
