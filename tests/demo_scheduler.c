@@ -1,11 +1,7 @@
 /*
- * demo_scheduler.c -- round-robin fairness made visible.
- *
- * Three clients submit very unequal bursts (a heavy client and two light
- * ones). A single FCFS queue would serve the whole heavy burst first,
- * starving the others. The round-robin dispatcher instead interleaves them:
- * the printed service order shows each client getting a turn, and no client
- * waits for the heavy one to fully drain.
+ * demo_scheduler.c - one heavy client + two light ones. FCFS would serve
+ * the heavy burst first; round robin interleaves, so the light clients
+ * finish long before the heavy one drains. printed order proves it.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "scheduler.h"

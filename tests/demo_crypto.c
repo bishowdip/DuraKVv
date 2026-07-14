@@ -1,12 +1,8 @@
 /*
- * demo_crypto.c -- authenticated encryption and password hashing (Task 3).
- *
- * Shows the three security guarantees DuraKV relies on:
- *   1. Confidentiality -- the sealed bytes are ciphertext, not the plaintext.
- *   2. Integrity      -- flipping a single ciphertext byte makes decryption
- *                        FAIL (the Poly1305 tag catches tampering).
- *   3. Authentication -- passwords are stored as Argon2id hashes; the right
- *                        password verifies, a wrong one does not.
+ * demo_crypto.c - the three guarantees in one run:
+ * confidentiality (sealed bytes are ciphertext), integrity (flip one byte
+ * -> decrypt FAILS), authentication (argon2id hash: right password in,
+ * wrong password out).
  */
 #include "crypto.h"
 

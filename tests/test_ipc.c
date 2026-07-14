@@ -1,11 +1,7 @@
 /*
- * test_ipc.c -- end-to-end test of the AF_UNIX server with CONCURRENT clients.
- *
- * A forked child runs the real server (server_run) over the storage engine.
- * The parent then opens many client connections from separate threads, each
- * doing SET/GET round-trips and verifying the framed responses. This exercises
- * the whole Phase 4 path: AF_UNIX sockets, length-prefixed framing, command
- * parsing, and concurrent service through the thread pool.
+ * test_ipc.c - fork the real server, hit it with 8 concurrent client
+ * threads x 50 SET/GET round trips, verify every framed reply. covers the
+ * whole task 4 path: af_unix + framing + dispatch + thread pool.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "server.h"

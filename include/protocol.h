@@ -1,16 +1,9 @@
 /*
- * protocol.h -- wire framing and local-socket helpers (DuraKV Phase 4).
- *
- * OS/systems primitive: protocol design, message framing, socket lifecycle.
- *
- * Transport is a Unix domain socket (AF_UNIX) -- a local IPC endpoint, NOT
- * TCP/IP. Every message is length-prefixed:
- *
- *     [ uint32 big-endian length N ][ N bytes of payload ]
- *
- * Length-prefixing removes partial-read ambiguity: the reader knows exactly
- * how many bytes a message contains and loops until it has them all. The
- * payload itself is a human-readable command/response line (SET/GET/...).
+ * protocol.h - wire framing + AF_UNIX helpers. transport is a unix domain
+ * socket = local IPC, NOT tcp/ip (the brief forbids tcp). every message:
+ *   [ u32 big-endian length ][ payload ]
+ * length prefix kills the partial-read problem -- reader knows exactly how
+ * many bytes to wait for. payload is a plain text command line.
  */
 #ifndef DURAKV_PROTOCOL_H
 #define DURAKV_PROTOCOL_H

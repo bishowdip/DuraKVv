@@ -1,11 +1,7 @@
 /*
- * test_belady.c -- demonstrates Belady's anomaly with the FIFO policy, and
- * confirms LRU (a stack algorithm) does not suffer it.
- *
- * The classic reference string 1 2 3 4 1 2 5 1 2 3 4 5 produces MORE page
- * faults with 4 frames than with 3 under FIFO -- the counter-intuitive result
- * that adding memory can hurt. We drive the *real* buffer pool over a backing
- * file so the fault counts come from the actual paging machinery, not a model.
+ * test_belady.c - the classic string 1 2 3 4 1 2 5 1 2 3 4 5 faults MORE
+ * with 4 frames than 3 under FIFO (belady's anomaly); LRU stays monotonic.
+ * driven through the real buffer pool, not a simulation.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "bufferpool.h"

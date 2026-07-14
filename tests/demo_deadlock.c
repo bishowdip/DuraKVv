@@ -1,20 +1,9 @@
 /*
- * demo_deadlock.c -- the Coffman circular-wait condition, and how a strict
- * lock ordering breaks it.
- *
- * OS/systems primitive: deadlock, the four Coffman conditions, lock hierarchy.
- *
- *   naive   : thread 1 locks A then B; thread 2 locks B then A. With a small
- *             stagger they each grab their first lock and then block forever
- *             on the second -> circular wait -> deadlock.
- *   ordered : both threads acquire locks in the SAME (ascending) order. There
- *             is no cycle, so the run completes. This is exactly the rule the
- *             storage engine follows for page latches: always lock pages in
- *             ascending page_id order.
- *
- * To keep the test suite from hanging, each scenario runs in a forked child
- * watched by a timeout: if the child does not finish, the parent declares a
- * deadlock and kills it.
+ * demo_deadlock.c - circular wait, then the fix.
+ * naive: t1 locks A->B, t2 locks B->A -> both stuck forever (coffman).
+ * ordered: both lock A->B -> no cycle, completes.
+ * each scenario runs in a forked child with a watchdog so the suite
+ * never hangs -- a killed child = deadlock confirmed.
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>

@@ -1,12 +1,7 @@
 /*
- * auth.h -- user store, password login, sessions (DuraKV Phase 5).
- *
- * OS/systems primitive: authentication.
- *
- * Each user record keeps an Argon2id password hash (never the password). Login
- * verifies with libsodium and, on success, issues a session id. A connection
- * holding a valid session is "authenticated"; commands before login are
- * rejected by the server.
+ * auth.h - user store + login. only the argon2id hash is kept, never the
+ * password. login ok -> session id > 0; server rejects data commands from
+ * connections that havent logged in.
  */
 #ifndef DURAKV_AUTH_H
 #define DURAKV_AUTH_H

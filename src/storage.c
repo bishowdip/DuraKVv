@@ -1,29 +1,14 @@
 /*
- * storage.c -- the storage engine: the durable core that ties the system
- * together. It owns the on-disk page file and turns it into a transactional
- * key/value store. Four cooperating pieces live here:
- *
- *  1. SLOTTED PAGES. The file is an array of fixed-size pages. Each page has a
- *     header, a slot directory growing downward from the top, and variable-
- *     length records growing upward from the bottom; a record is addressed by
- *     (page_id, slot). This is the standard database page layout because it lets
- *     records vary in size and be deleted (tombstoned) without moving others.
- *
- *  2. KEY DIRECTORY. An in-memory chained-hash map from key -> (page_id, slot)
- *     for O(1) average lookup. It is not persisted; it is rebuilt by scanning
- *     the pages at open, so it can never disagree with disk.
- *
- *  3. TRANSACTIONS. Every mutation is wrapped as BEGIN/UPDATE.../COMMIT in the
- *     WAL and made durable BEFORE the data pages are touched (see commit_mods),
- *     giving atomicity and durability -- the point that makes DuraKV crash-safe.
- *
- *  4. CONCURRENCY & CACHING. Public ops are thin wrappers that take a
- *     pthread_rwlock (shared for reads, exclusive for writes) around lock-free
- *     *_unlocked cores; the live read/write path flows through the write-back
- *     buffer pool. page_read/page_write are the single choke point where
- *     encryption at rest is (later) applied.
- *
- * See include/storage.h for the public contract and on-disk structures.
+ * storage.c - the engine. four things live here:
+ *  1. slotted pages: slot dir grows down, records grow up, delete = tombstone.
+ *  2. key directory: in-ram hash map key -> (page,slot). rebuilt on open by
+ *     scanning pages, so it can never disagree with disk.
+ *  3. transactions: every mutation goes BEGIN/UPDATE/COMMIT into the WAL and
+ *     is fsync'd BEFORE data pages are touched (commit_mods). thats the
+ *     crash safety.
+ *  4. rwlock (GET shared, SET/DEL exclusive) + write-back buffer pool on the
+ *     live path. page_read/page_write is the one choke point where
+ *     encryption at rest happens.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "storage.h"
@@ -42,10 +27,8 @@
 /* Slotted-page primitives                                                */
 /* ====================================================================== */
 
-/* Initialise a blank page: zero it, then set the header. free_end marks the
- * bottom of the record area and moves DOWN as records are inserted, while the
- * slot directory grows UP from just after the header -- the page is full when
- * the two meet. */
+/* blank page: free_end moves DOWN as records go in, slot dir grows UP from
+ * the header. page is full when they meet. */
 void page_init(uint8_t *page, uint64_t page_id)
 {
     memset(page, 0, PAGE_SIZE);
@@ -67,9 +50,7 @@ uint16_t page_free_space(const uint8_t *page)
     return (uint16_t)(h->free_end - dir_end);
 }
 
-/* Insert a record, returning its slot index via slot_out. Places the record at
- * the bottom of the free area and appends a directory slot at the top. Returns
- * -1 if it would not fit (record area and slot directory would collide). */
+/* put record at bottom of free area + new slot at top. -1 if no room. */
 int page_insert(uint8_t *page, const uint8_t *rec, uint16_t reclen, uint16_t *slot_out)
 {
     PageHeader *h = (PageHeader *)page;
@@ -89,9 +70,8 @@ int page_insert(uint8_t *page, const uint8_t *rec, uint16_t reclen, uint16_t *sl
     return 0;
 }
 
-/* Delete a record by marking its slot dead (len=0). This is a "tombstone": the
- * record's bytes are left in place and its space is reclaimed only when the page
- * is later compacted -- so deletes are cheap and never shift other records. */
+/* tombstone: mark the slot dead (len=0), bytes stay until compaction.
+ * cheap delete, nothing shifts. */
 void page_tombstone(uint8_t *page, uint16_t slot)
 {
     PageHeader *h = (PageHeader *)page;
@@ -140,17 +120,35 @@ void record_parse(const uint8_t *rec, const char **key, uint16_t *klen,
 /* Raw page I/O                                                           */
 /* ====================================================================== */
 
+#define PAGE_SLOT_MAX (PAGE_SIZE + 64)   /* logical page + room for AEAD overhead */
+
 int page_read(DB *db, uint64_t page_id, uint8_t *buf)
 {
-    ssize_t n = pread(db->data_fd, buf, PAGE_SIZE, (off_t)page_id * PAGE_SIZE);
-    if (n < (ssize_t)PAGE_SIZE) page_init(buf, page_id);   /* hole/EOF -> empty */
+    if (!db->codec) {                              /* plaintext */
+        ssize_t n = pread(db->data_fd, buf, PAGE_SIZE, (off_t)page_id * PAGE_SIZE);
+        if (n < (ssize_t)PAGE_SIZE) page_init(buf, page_id);   /* hole/EOF -> empty */
+        return DK_OK;
+    }
+    uint8_t blob[PAGE_SLOT_MAX];                   /* encrypted: read + unseal */
+    ssize_t n = pread(db->data_fd, blob, db->phys_page, (off_t)page_id * db->phys_page);
+    if (n < (ssize_t)db->phys_page) { page_init(buf, page_id); return DK_OK; }
+    long m = db->codec->open(db->codec->ctx, blob, db->phys_page, buf);
+    if (m != (long)PAGE_SIZE) page_init(buf, page_id);   /* wrong key / corrupt */
     return DK_OK;
 }
 
 int page_write(DB *db, uint64_t page_id, const uint8_t *buf)
 {
-    ssize_t n = pwrite(db->data_fd, buf, PAGE_SIZE, (off_t)page_id * PAGE_SIZE);
-    if (n != (ssize_t)PAGE_SIZE) return DK_IO;
+    if (!db->codec) {                              /* plaintext */
+        ssize_t n = pwrite(db->data_fd, buf, PAGE_SIZE, (off_t)page_id * PAGE_SIZE);
+        if (n != (ssize_t)PAGE_SIZE) return DK_IO;
+        if (page_id + 1 > db->page_count) db->page_count = page_id + 1;
+        return DK_OK;
+    }
+    uint8_t blob[PAGE_SLOT_MAX];                   /* encrypted: seal + write */
+    long sl = db->codec->seal(db->codec->ctx, buf, PAGE_SIZE, blob);
+    ssize_t n = pwrite(db->data_fd, blob, (size_t)sl, (off_t)page_id * db->phys_page);
+    if (n != sl) return DK_IO;
     if (page_id + 1 > db->page_count) db->page_count = page_id + 1;
     return DK_OK;
 }
@@ -170,9 +168,7 @@ static int bp_io_write(void *ctx, uint64_t page_id, const uint8_t *in)
 /* Key directory (chained hash map)                                       */
 /* ====================================================================== */
 
-/* djb2 string hash: fast, simple, good enough spread for the directory. Lookup
- * is O(1) average (uniform hashing) but O(n) worst case if many keys collide
- * into one bucket -- acceptable here, resizable in a production system. */
+/* djb2. O(1) average lookup, O(n) worst case if everything collides. fine here. */
 static size_t hash_key(const char *s)
 {
     size_t h = 5381;
@@ -250,8 +246,7 @@ static void page_free_ensure(DB *db, uint64_t page_id)
     db->page_free_cap = ncap;
 }
 
-/* Find a data page (id >= 1) with at least `need` bytes free, allocating a
- * fresh page at the end of the file if none qualifies. */
+/* first data page with `need` bytes free, or a fresh one at the end. */
 static uint64_t find_page(DB *db, uint16_t need)
 {
     for (uint64_t pid = 1; pid < db->page_count; pid++)
@@ -271,8 +266,7 @@ static uint64_t find_page(DB *db, uint16_t need)
 /* Cached page access (live path goes through the buffer pool)            */
 /* ====================================================================== */
 
-/* Read a page's current contents through the buffer pool. Recovery and the
- * post-open index rebuild run before db->bp exists and use page_read directly. */
+/* read via the pool. recovery/rebuild run before bp exists, they go direct. */
 static void cached_read(DB *db, uint64_t page_id, uint8_t *dst)
 {
     uint8_t *frame = bp_pin(db->bp, page_id);
@@ -280,8 +274,7 @@ static void cached_read(DB *db, uint64_t page_id, uint8_t *dst)
     bp_unpin(db->bp, page_id, 0);
 }
 
-/* Install a page's new contents into the pool and mark the frame dirty. The
- * page is flushed to data.db lazily (on eviction / checkpoint / close). */
+/* write into the pool, mark dirty. flushed lazily (evict/checkpoint/close). */
 static void cached_write(DB *db, uint64_t page_id, const uint8_t *src)
 {
     uint8_t *frame = bp_pin(db->bp, page_id);
@@ -300,10 +293,9 @@ typedef struct {
     uint8_t  after[PAGE_SIZE];
 } Mod;
 
-/* Log [BEGIN, UPDATE..., COMMIT], fsync the WAL, then write the data pages.
- * This is the durability heartbeat: the commit is durable the instant the WAL
- * fsync returns, and the data pages are only written back afterwards -- so a
- * crash between the two is repaired by replaying the log (recovery, next layer). */
+/* log BEGIN/UPDATE.../COMMIT, fsync the WAL, THEN touch data pages.
+ * commit is durable the moment the fsync returns. crash after that ->
+ * recovery replays the log. this function is the whole crash-safety story. */
 static int commit_mods(DB *db, Mod *mods, int nmods)
 {
     uint64_t txn = db->next_txn++;
@@ -313,18 +305,25 @@ static int commit_mods(DB *db, Mod *mods, int nmods)
         /* stamp the after-image with the LSN this UPDATE will receive, so
          * recovery's page_lsn comparison is exact and idempotent. */
         page_set_lsn(mods[i].after, db->next_lsn);
-        prev = wal_append(db, WAL_UPDATE, txn, prev, mods[i].page_id,
-                          mods[i].before, PAGE_SIZE,
-                          mods[i].after,  PAGE_SIZE);
+        if (db->codec) {
+            /* seal the page images so the WAL leaks no plaintext either */
+            uint8_t sb[PAGE_SLOT_MAX], sa[PAGE_SLOT_MAX];
+            long lb = db->codec->seal(db->codec->ctx, mods[i].before, PAGE_SIZE, sb);
+            long la = db->codec->seal(db->codec->ctx, mods[i].after,  PAGE_SIZE, sa);
+            prev = wal_append(db, WAL_UPDATE, txn, prev, mods[i].page_id,
+                              sb, (uint32_t)lb, sa, (uint32_t)la);
+        } else {
+            prev = wal_append(db, WAL_UPDATE, txn, prev, mods[i].page_id,
+                              mods[i].before, PAGE_SIZE,
+                              mods[i].after,  PAGE_SIZE);
+        }
     }
     wal_append(db, WAL_COMMIT, txn, prev, 0, NULL, 0, NULL, 0);
 
     wal_fsync(db);               /* <-- the commit is durable here */
 
-    /* Now (and only now, post-fsync) install the after-images into the buffer
-     * pool. They become dirty frames flushed lazily; data.db is fsync'd only at
-     * checkpoint/close. A crash that loses these unsynced pages is repaired by
-     * redo, because the WAL holding their after-images is already durable. */
+    /* only after the fsync: install after-images into the pool as dirty
+     * frames. losing them in a crash is fine, redo rebuilds from the WAL. */
     for (int i = 0; i < nmods; i++) {
         cached_write(db, mods[i].page_id, mods[i].after);
         page_free_ensure(db, mods[i].page_id);
@@ -337,15 +336,9 @@ static int commit_mods(DB *db, Mod *mods, int nmods)
 /* Mutations                                                              */
 /* ====================================================================== */
 
-/*
- * Core of SET. Builds the record, then decides where it goes: update-in-place
- * if the key exists and its page still has room, otherwise tombstone the old
- * copy and insert onto a page with space (allocating a new one if needed).
- *
- * All the touched pages are gathered as Mods and committed atomically via the
- * WAL, so a crash mid-update never leaves a half-applied key. The directory is
- * updated only after the commit succeeds.
- */
+/* SET core. update in place if the old page still has room, else tombstone
+ * old + insert on a page with space. all touched pages go through one
+ * commit_mods, so a crash mid-update never half-applies a key. */
 static int db_set_unlocked(DB *db, const char *key, const void *val, uint32_t vlen)
 {
     size_t klen = strlen(key);
@@ -435,10 +428,8 @@ static int db_del_unlocked(DB *db, const char *key)
     return DK_OK;
 }
 
-/* ---- public, thread-safe wrappers -------------------------------------- *
- * Writers take the rwlock exclusively; readers share it. The buffer pool has
- * its own internal mutex, so concurrent readers may fault pages safely. The
- * nesting order is always DB rwlock (outer) -> buffer-pool mutex (inner). */
+/* public wrappers: writers exclusive, readers shared. lock order is always
+ * DB rwlock (outer) -> bp mutex (inner), never the other way. */
 
 int db_set(DB *db, const char *key, const void *val, uint32_t vlen)
 {
@@ -464,9 +455,8 @@ int db_del(DB *db, const char *key)
     return rc;
 }
 
-/* Force a consistent, fully-durable state and mark it in the WAL. After a
- * checkpoint, recovery need not replay anything before it -- which is what
- * bounds recovery time and lets the WAL be trimmed. */
+/* flush everything + mark it in the WAL. recovery can skip anything before
+ * the checkpoint, which is what keeps recovery time bounded. */
 void db_checkpoint(DB *db)
 {
     pthread_rwlock_wrlock(&db->lock);
@@ -481,7 +471,7 @@ void db_checkpoint(DB *db)
 /* Open / rebuild / close                                                 */
 /* ====================================================================== */
 
-/* Scan all data pages and rebuild the in-memory directory + free map. */
+/* scan every data page, rebuild the directory + free map from disk. */
 static void rebuild_index(DB *db)
 {
     dir_init(&db->dir);
@@ -506,6 +496,27 @@ static void rebuild_index(DB *db)
     }
 }
 
+int storage_peek(const char *data_path, int *is_new, uint8_t salt[DURAKV_SALT_LEN],
+                 int *encrypted)
+{
+    *is_new = 0; *encrypted = 0;
+    if (salt) memset(salt, 0, DURAKV_SALT_LEN);
+
+    int fd = open(data_path, O_RDONLY);
+    if (fd < 0) { *is_new = 1; return 0; }
+    off_t sz = lseek(fd, 0, SEEK_END);
+    if (sz == 0) { *is_new = 1; close(fd); return 0; }
+
+    uint8_t hdr[64];
+    if (pread(fd, hdr, sizeof(hdr), 0) == (ssize_t)sizeof(hdr)) {
+        uint32_t enc; memcpy(&enc, hdr + 16, 4);
+        *encrypted = enc ? 1 : 0;
+        if (salt) memcpy(salt, hdr + 20, DURAKV_SALT_LEN);
+    }
+    close(fd);
+    return 0;
+}
+
 DB *db_open(const char *data_path, const char *wal_path)
 {
     return db_open_ex(data_path, wal_path, 64, POLICY_LRU);
@@ -514,28 +525,43 @@ DB *db_open(const char *data_path, const char *wal_path)
 DB *db_open_ex(const char *data_path, const char *wal_path,
                size_t nframes, PolicyKind policy)
 {
+    return db_open_full(data_path, wal_path, nframes, policy, NULL);
+}
+
+DB *db_open_full(const char *data_path, const char *wal_path,
+                 size_t nframes, PolicyKind policy, PageCodec *codec)
+{
     DB *db = calloc(1, sizeof(*db));
     if (!db) return NULL;
+
+    db->codec     = codec;
+    db->phys_page = PAGE_SIZE + (codec ? codec->overhead : 0);
 
     db->data_fd = open(data_path, O_RDWR | O_CREAT, 0600);
     if (db->data_fd < 0) { perror("open data"); free(db); return NULL; }
 
     off_t sz = lseek(db->data_fd, 0, SEEK_END);
     if (sz == 0) {
-        /* fresh store: write the header page 0 */
-        uint8_t p0[PAGE_SIZE];
-        memset(p0, 0, PAGE_SIZE);
+        /* fresh store: header page 0. stays plaintext even when encrypted,
+         * it carries the KDF salt you need before you have the key. */
+        uint8_t p0[PAGE_SLOT_MAX];
+        memset(p0, 0, db->phys_page);
         memcpy(p0, DURAKV_MAGIC, 8);
         uint32_t ver = DURAKV_VERSION, ps = PAGE_SIZE;
         memcpy(p0 + 8, &ver, 4);
         memcpy(p0 + 12, &ps, 4);
-        if (pwrite(db->data_fd, p0, PAGE_SIZE, 0) != (ssize_t)PAGE_SIZE) {
+        if (codec) {
+            uint32_t enc = 1;
+            memcpy(p0 + 16, &enc, 4);
+            memcpy(p0 + 20, codec->salt, DURAKV_SALT_LEN);
+        }
+        if (pwrite(db->data_fd, p0, db->phys_page, 0) != (ssize_t)db->phys_page) {
             perror("init header"); close(db->data_fd); free(db); return NULL;
         }
         fsync(db->data_fd);
         db->page_count = 1;
     } else {
-        db->page_count = (uint64_t)(sz / PAGE_SIZE);
+        db->page_count = (uint64_t)(sz / db->phys_page);
         if (db->page_count == 0) db->page_count = 1;
     }
 
@@ -546,15 +572,11 @@ DB *db_open_ex(const char *data_path, const char *wal_path,
     db->next_txn = 1;
     pthread_rwlock_init(&db->lock, NULL);
 
-    /* ORDER MATTERS: recover first so the pages are correct, THEN build the
-     * directory from those recovered pages, THEN start caching. Doing recovery
-     * before the pool exists also guarantees the pool starts cold. */
-    recovery_run(db);            /* analysis / redo / undo (direct page I/O) */
-    rebuild_index(db);           /* directory reflects the recovered pages   */
+    /* order matters: recover first, then rebuild the directory from the
+     * recovered pages, then create the pool (cold) last. */
+    recovery_run(db);
+    rebuild_index(db);
 
-    /* the buffer pool is created last: recovery and rebuild use direct page
-     * I/O, so the pool starts cold and every later access flows through it.
-     * Route its I/O through page_read/page_write (the encryption choke point). */
     db->bp = bp_create(db->data_fd, nframes, policy);
     bp_set_io(db->bp, db, bp_io_read, bp_io_write);
     return db;
@@ -572,5 +594,9 @@ void db_close(DB *db)
     free(db->page_free);
     close(db->data_fd);
     close(db->wal_fd);
+    if (db->codec) {
+        if (db->codec->free_ctx) db->codec->free_ctx(db->codec->ctx);
+        free(db->codec);
+    }
     free(db);
 }

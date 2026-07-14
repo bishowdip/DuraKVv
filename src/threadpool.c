@@ -1,28 +1,9 @@
 /*
- * threadpool.c -- bounded-buffer (producer-consumer) thread pool.
- *
- * This is the concurrency engine behind Task 1 (process/threading) and the
- * server's ability to serve many clients at once (Task 4): the accept loop is
- * the *producer* that enqueues one job per connection, and a fixed set of
- * worker threads are the *consumers* that run them.
- *
- * Synchronisation model -- a monitor built from one mutex + two condition
- * variables over a bounded ring buffer:
- *
- *   - `mtx`        serialises every access to the shared queue state
- *                  (queue[], head, tail, count, shutdown), so there is no data
- *                  race on the buffer itself.
- *   - `not_empty`  workers sleep on this while there is nothing to consume;
- *                  a producer signals it after enqueuing.
- *   - `not_full`   producers sleep on this while the buffer is full
- *                  (backpressure); a worker signals it after dequeuing.
- *
- * pthreads condition variables follow *Mesa* semantics: a signalled thread is
- * merely made runnable, it is not guaranteed to run next, so the predicate it
- * waited for may already be false again by the time it re-acquires the mutex.
- * Every wait therefore sits inside a `while (predicate)` loop, not an `if` --
- * this also makes spurious wakeups (permitted by POSIX) harmless.
- * See include/threadpool.h for the public contract.
+ * threadpool.c - bounded-buffer producer/consumer pool. the server's accept
+ * loop produces one job per connection, workers consume them.
+ * mtx guards the queue, not_empty wakes workers, not_full wakes producers.
+ * every wait is a while-loop not an if: pthread condvars are mesa style
+ * (signalled thread just becomes runnable) + POSIX allows spurious wakeups.
  */
 #define _POSIX_C_SOURCE 200809L    /* expose the POSIX pthreads/condvar API */
 #include "threadpool.h"
@@ -51,11 +32,8 @@ struct ThreadPool {
     unsigned long   completed;   /* running total of finished jobs (stats)    */
 };
 
-/*
- * Worker loop: block until a job is available, take exactly one, then run it
- * with the lock released so jobs execute concurrently. Exits only once the
- * pool is both shutting down AND fully drained, so no queued work is dropped.
- */
+/* worker: wait for a job, take one, run it OUTSIDE the lock (thats what
+ * gives parallelism). exits only when shutdown AND drained. */
 static void *worker_main(void *arg)
 {
     ThreadPool *tp = arg;
@@ -88,11 +66,7 @@ static void *worker_main(void *arg)
     }
 }
 
-/*
- * Allocate the pool, initialise its synchronisation objects, and spawn the
- * worker threads. Arguments are clamped to a sane minimum of 1 so a caller
- * cannot create a pool that can never make progress.
- */
+/* build the pool + spawn workers. args clamped to >= 1. */
 ThreadPool *threadpool_create(int nworkers, int queue_cap)
 {
     if (nworkers < 1) nworkers = 1;
@@ -113,11 +87,8 @@ ThreadPool *threadpool_create(int nworkers, int queue_cap)
     return tp;
 }
 
-/*
- * Producer side. Enqueue one job, blocking while the buffer is full so a fast
- * producer cannot outrun the workers and grow memory without bound
- * (backpressure). Returns 0 on success, or -1 if the pool is shutting down.
- */
+/* producer: enqueue one job, blocking while full (backpressure).
+ * -1 if the pool is shutting down. */
 int threadpool_submit(ThreadPool *tp, job_fn fn, void *arg)
 {
     pthread_mutex_lock(&tp->mtx);
@@ -136,12 +107,7 @@ int threadpool_submit(ThreadPool *tp, job_fn fn, void *arg)
     return 0;
 }
 
-/*
- * Graceful shutdown: stop accepting jobs, let the workers finish everything
- * already queued, then join them and release all resources. Safe to call with
- * a NULL pool. Must be called from a single thread that owns the pool's
- * lifetime (typically the one that created it).
- */
+/* graceful shutdown: refuse new jobs, drain the queue, join everyone. */
 void threadpool_shutdown(ThreadPool *tp)
 {
     if (!tp) return;
@@ -166,11 +132,8 @@ void threadpool_shutdown(ThreadPool *tp)
     free(tp);
 }
 
-/*
- * Read the completed-job counter. Taken under the lock because a plain read of
- * a value another thread writes is a data race (undefined behaviour) even for
- * a single word.
- */
+/* counter under the lock -- an unlocked read of a value another thread
+ * writes is a data race, even for one word. */
 unsigned long threadpool_completed(ThreadPool *tp)
 {
     pthread_mutex_lock(&tp->mtx);

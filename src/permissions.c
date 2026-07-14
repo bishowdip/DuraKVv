@@ -1,16 +1,9 @@
 /*
- * permissions.c -- an access-control model on key namespaces, modelled directly
- * on the classic Unix owner/group/other rwx permission bits (Task 3).
- *
- * Every key belongs to a namespace (the prefix before ':'), and each namespace
- * has an owner, a group, and a 3-digit octal mode. A request is checked against
- * exactly ONE triad, chosen by identity: owner bits if the user owns the
- * namespace, else group bits if the user is in its group, else "other" bits.
- * This is the same first-match precedence the Unix kernel uses for files -- an
- * owner who lacks a bit is denied even if "other" would allow it.
- *
- * Mode encoding (per triad): r=4, w=2, x=1, so e.g. 0640 = owner rw-, group
- * r--, other ---. See include/permissions.h.
+ * permissions.c - the unix owner/group/other model applied to key
+ * namespaces. exactly ONE triad applies, first match wins (owner, else
+ * group, else other) -- same precedence the kernel uses, so an owner
+ * missing a bit is denied even if "other" would allow. 0640 = owner rw,
+ * group r, other nothing.
  */
 #include "permissions.h"
 
@@ -64,9 +57,8 @@ int perm_set(PermTable *p, const char *ns, const char *owner,
     return 0;
 }
 
-/* Decide whether `user` (in `user_group`) may perform op ('r'/'w'/'x') on `ns`.
- * Returns 1 to allow, 0 to deny. Fails closed: an unknown namespace is denied
- * rather than allowed. */
+/* may user do op ('r'/'w'/'x') on ns? 1 allow, 0 deny. unknown namespace =
+ * deny (fail closed). */
 int perm_check(PermTable *p, const char *ns, const char *user,
                const char *user_group, char op)
 {

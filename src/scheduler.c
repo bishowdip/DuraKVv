@@ -1,21 +1,9 @@
 /*
- * scheduler.c -- a round-robin request scheduler (Task 1, "process scheduling").
- *
- * Each client gets its OWN FIFO queue; the dispatcher serves the queues in
- * strict rotation, one request per client per turn. This is the classic
- * round-robin discipline, and its defining property is FAIRNESS / no
- * starvation: because the cursor always advances *past* the client it just
- * served, a client that floods the system with work cannot monopolise the
- * dispatcher -- every other client with pending work is guaranteed service
- * within one full sweep of the ring. (Contrast a single shared FIFO, where a
- * burst from one client delays everyone behind it.)
- *
- * Time complexity: enqueue is O(1); scheduler_next is O(nclients) worst case
- * because it may skip empty queues to find the next client with work.
- *
- * Thread-safe via a single mutex, so the network acceptor thread can enqueue
- * while a dispatcher thread pulls the next request concurrently.
- * See include/scheduler.h for the public contract.
+ * scheduler.c - round robin. each client has its own FIFO, served one
+ * request per turn in rotation; the cursor always moves PAST the client it
+ * just served, so nobody starves -- any client with work gets service
+ * within one sweep of the ring. enqueue O(1), next O(nclients) worst case
+ * (skipping empties). one mutex makes it thread safe.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "scheduler.h"
@@ -63,8 +51,7 @@ void scheduler_destroy(Scheduler *s)
     free(s);
 }
 
-/* Append a request to the given client's queue. Out-of-range ids are ignored
- * rather than trusted, so a bad client id cannot corrupt memory. */
+/* append to a client's queue. bad ids ignored, not trusted. */
 void scheduler_enqueue(Scheduler *s, int client_id, void *request)
 {
     if (client_id < 0 || client_id >= s->nclients) return;
@@ -80,16 +67,8 @@ void scheduler_enqueue(Scheduler *s, int client_id, void *request)
     pthread_mutex_unlock(&s->mtx);
 }
 
-/*
- * Pull the next request in round-robin order. Returns 1 and fills *client_out
- * / *req_out when work was dispatched, or 0 when every queue is empty.
- *
- * The rotation is the heart of the fairness guarantee: starting from `cursor`
- * we scan forward for the first client with work, serve exactly one of its
- * requests, then move the cursor one past that client. So the next call
- * necessarily favours a *different* client -- no single client can be served
- * twice while another waits.
- */
+/* next request in rr order. 1 = dispatched, 0 = all queues empty.
+ * serve one, move cursor past that client = the fairness guarantee. */
 int scheduler_next(Scheduler *s, int *client_out, void **req_out)
 {
     pthread_mutex_lock(&s->mtx);

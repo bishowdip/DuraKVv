@@ -1,15 +1,8 @@
 /*
- * storage.h -- Page file + slotted-page key/value storage (DuraKV Phase 1).
- *
- * OS/systems primitive: file I/O, on-disk data structures (slotted pages).
- *
- * The page file (data.db) is an array of fixed-size pages:
- *   - page 0 is the immutable header page (magic / version / page_size).
- *   - pages 1..N-1 are slotted data pages holding {key,value} records.
- *
- * Durability comes from the write-ahead log (see wal.h): every mutation is
- * logged and fsync'd before its data pages are written back. Crash recovery
- * (replaying the log) is the next layer up.
+ * storage.h - page file + slotted-page key/value storage.
+ * page 0 = header (magic/version/page size), pages 1..N-1 = slotted data
+ * pages holding {key,value} records. durability = WAL first (wal.h), data
+ * pages after; recovery replays the log on open.
  */
 #ifndef DURAKV_STORAGE_H
 #define DURAKV_STORAGE_H
@@ -45,6 +38,21 @@ typedef struct __attribute__((packed)) {
 /* Largest record that fits in an empty page (one header + one slot). */
 #define MAX_RECORD (PAGE_SIZE - (int)sizeof(PageHeader) - (int)sizeof(Slot))
 
+/* ---- optional encryption-at-rest codec ---------------------------------
+ * when a DB has one, every page to data.db and every WAL page image gets
+ * sealed. only encryption.c touches libsodium -- storage/recovery just call
+ * these function pointers, so the core stays dependency free. */
+#define DURAKV_SALT_LEN 16
+
+typedef struct PageCodec {
+    void   *ctx;                                   /* holds the derived key   */
+    long  (*seal)(void *ctx, const uint8_t *plain, size_t plen, uint8_t *out);
+    long  (*open)(void *ctx, const uint8_t *in, size_t inlen, uint8_t *plain);
+    size_t  overhead;                              /* bytes seal adds         */
+    void  (*free_ctx)(void *ctx);
+    uint8_t salt[DURAKV_SALT_LEN];                 /* stored plaintext in hdr */
+} PageCodec;
+
 /* ---- in-memory key directory (hash map: key -> (page_id, slot)) -------- */
 
 typedef struct DirEntry {
@@ -75,6 +83,8 @@ typedef struct DB {
     size_t    page_free_cap;    /* capacity of page_free[]                   */
     struct BufferPool *bp;      /* page cache (NULL during recovery)         */
     pthread_rwlock_t lock;      /* many concurrent readers, exclusive writers*/
+    PageCodec *codec;           /* encryption-at-rest (NULL => plaintext)    */
+    size_t    phys_page;        /* on-disk page slot size (PAGE_SIZE + ovhd) */
 } DB;
 
 /* ---- return codes ------------------------------------------------------ */
@@ -89,11 +99,23 @@ enum {
 /* ---- public key/value API ---------------------------------------------- */
 
 /* Open (or create) the store and its write-ahead log, and return a handle.
- * db_open uses sensible defaults; db_open_ex configures the buffer pool. */
+ * db_open uses sensible defaults; db_open_ex configures the buffer pool;
+ * db_open_full additionally attaches an encryption codec (NULL => plaintext)
+ * and takes ownership of it. db_open_secure (src/encryption.c) derives a key
+ * from a password and calls db_open_full. */
 DB  *db_open(const char *data_path, const char *wal_path);
 DB  *db_open_ex(const char *data_path, const char *wal_path,
                 size_t nframes, PolicyKind policy);
+DB  *db_open_full(const char *data_path, const char *wal_path,
+                  size_t nframes, PolicyKind policy, PageCodec *codec);
+DB  *db_open_secure(const char *data_path, const char *wal_path,
+                    size_t nframes, PolicyKind policy, const char *password);
 void db_close(DB *db);
+
+/* Peek a data file's header without a full open: reports whether it is new
+ * (absent/empty), whether it is encrypted, and its KDF salt. */
+int  storage_peek(const char *data_path, int *is_new, uint8_t salt[DURAKV_SALT_LEN],
+                  int *encrypted);
 
 int  db_set(DB *db, const char *key, const void *val, uint32_t vlen);
 /* Copies up to buflen bytes of the value into valbuf; *vlen_out gets the

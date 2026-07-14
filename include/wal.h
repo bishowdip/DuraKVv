@@ -1,23 +1,9 @@
 /*
- * wal.h -- Write-ahead log (DuraKV Phase 1).
- *
- * OS/systems primitive: durability via fsync(), write-ahead logging.
- *
- * The WAL is an append-only file of length-prefixed records:
- *
- *     [reclen u32][ body (reclen bytes, including trailing crc32) ]
- *
- * body = lsn u64 | prev_lsn u64 | txn_id u64 | type u8 | page_id u64
- *        | before_len u32 | before[] | after_len u32 | after[] | crc32 u32
- *
- * Phase 1 uses *page-level* logging: before/after images are full page
- * snapshots. This makes redo idempotent (compare page_lsn) and transparently
- * repairs torn page writes.
- *
- * The write-ahead invariant: a dirty data page is never written to data.db
- * until the WAL has been fsync()'d up to that page's last log record. We
- * satisfy it the simple way -- every transaction fsyncs the whole WAL (after
- * its COMMIT record) *before* any of its data pages are written back.
+ * wal.h - write-ahead log. append-only, length-prefixed records:
+ *   [reclen u32][ lsn | prev_lsn | txn | type u8 | page_id
+ *                 | before_len + before[] | after_len + after[] | crc32 ]
+ * page-level logging (full before/after images) so redo is idempotent and
+ * torn pages get repaired. invariant: log fsync'd BEFORE data page written.
  */
 #ifndef DURAKV_WAL_H
 #define DURAKV_WAL_H

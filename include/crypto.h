@@ -1,13 +1,8 @@
 /*
- * crypto.h -- authenticated encryption + password hashing (DuraKV Phase 5).
- *
- * OS/systems primitive: authenticated encryption (AEAD), key derivation.
- *
- * Thin wrappers over libsodium. We use XChaCha20-Poly1305 (AEAD) rather than
- * AES-GCM because (a) it needs no hardware-AES instruction, and (b) its
- * 192-bit nonce makes a fresh random nonce per message collision-safe,
- * avoiding the catastrophic nonce-reuse footgun of GCM. Keys come from a
- * password via Argon2id (memory-hard). Never roll your own crypto.
+ * crypto.h - AEAD + password hashing, thin wrappers over libsodium.
+ * XChaCha20-Poly1305 over AES-GCM because it needs no AES hardware and the
+ * 192-bit nonce makes random nonces safe (no GCM nonce-reuse footgun).
+ * passwords/keys go through Argon2id (memory hard). never roll your own.
  */
 #ifndef DURAKV_CRYPTO_H
 #define DURAKV_CRYPTO_H

@@ -4,14 +4,16 @@ A crash-safe, multi-client key–value store in C, built in layers: the durable
 spine (storage + write-ahead log + crash recovery), a buffer pool (paging with
 FIFO/LRU eviction), concurrency (thread pool, round-robin scheduler, a
 thread-safe store), network/IPC (an AF_UNIX client/server), and a security
-layer (encryption, authentication, permissions). The core engine needs only
-**pthreads** (in libc); **libsodium** is confined to the security demos.
+layer (encryption, authentication, permissions, audit). Dependencies:
+**pthreads** (in libc) and **libsodium** for the security layer — the
+storage/recovery core itself never touches libsodium.
 
 ## Build & run
 
 ```bash
-make            # build the durakv CLI, server and client, and the tests
-make test       # run the unit tests and demos
+make            # build the durakv CLI, server, client and web bridge
+make test       # run all unit tests and demos
+make demo       # guided showcase of every feature, grouped by task
 make crashtest  # the headline kill -9 durability demo
 make clean
 ```
@@ -190,6 +192,28 @@ receive (pull a priority message ahead of FIFO ones) — something a byte stream
 cannot do. (System V IPC is used because macOS does not implement POSIX
 `mq_*`.)
 
+### Web dashboard (no terminal needed)
+
+For a click-driven demo anyone can run, `durakv-web` starts a small **pure-C
+HTTP bridge** and opens a browser control room:
+
+```bash
+make                 # builds durakv-web too
+./durakv-web         # then open http://127.0.0.1:8080
+```
+
+Browsers speak HTTP/TCP; the graded server speaks AF_UNIX. So `durakv-web`
+supervises a **real `durakv-server` child** and relays every dashboard action
+to it over the AF_UNIX protocol — nothing on the page is faked. It provides a
+key/value console, a **crash button** that really `SIGKILL`s the server (then
+restarts it so recovery replays the WAL and the committed data returns), live
+buffer-pool stats, and a security panel driving the real crypto/auth/audit
+modules. Run it from the project root so it can find `web/dashboard.html`.
+
+**The web bridge is an innovation layer only** — the assessed Task 4
+client-server application is the AF_UNIX `durakv-server`/`durakv-client` pair
+above, which contains no TCP/IP.
+
 | Test | Proves |
 |------|--------|
 | `tests/test_ipc.c` | 8 concurrent clients × 50 ops over AF_UNIX, framed responses verified |
@@ -197,8 +221,9 @@ cannot do. (System V IPC is used because macOS does not implement POSIX
 
 ## Security (Phase 5)
 
-Built on **libsodium** (`brew install libsodium`); the security demos link it,
-while the core engine stays dependency-free.
+Built on **libsodium** (`brew install libsodium`). Only the security modules
+link it; `storage.c`/`recovery.c` reach encryption through function pointers
+and never include a libsodium header.
 
 - **File permissions** (`tests/file_demo.c`) — the POSIX model directly:
   `open`/`creat` with a mode, `chmod` to change rwx, `access()` to query, and
@@ -211,29 +236,46 @@ while the core engine stays dependency-free.
   (memory-hard); wrong passwords and unknown users are rejected identically.
 - **Permissions** (`src/permissions.c`) — owner/group/other **rwx** on key
   namespaces, exactly like Unix file bits (first-match triad precedence).
+- **Audit** (`src/audit.c`) — append-only, **hash-chained** log
+  (`hash = SHA-256(prev || entry)`); editing any past entry breaks the chain,
+  which `audit_verify()` detects and pinpoints.
+- **Encryption at rest** (`src/encryption.c`) — opt-in via a master password
+  (`DURAKV_PASSWORD`). A key is derived (Argon2id, salt in the header) and every
+  page written to `data.db` *and* every page image logged to `wal.log` is
+  sealed. `storage.c`/`recovery.c` stay libsodium-free, calling a codec through
+  function pointers. Durability is unaffected: the crashtest still passes with
+  encryption on.
+- **Server enforcement** — with `DURAKV_SECURE=1` the server requires `AUTH`
+  before data commands, checks rwx on each key's namespace, and writes every
+  attempt (allowed or DENIED) to the audit log.
 
 | Test | Proves |
 |------|--------|
 | `tests/file_demo.c` | POSIX create / chmod / access; write to a read-only file denied |
 | `tests/demo_crypto.c` | AEAD confidentiality + integrity; Argon2id password auth |
 | `tests/demo_auth.c` | Argon2 login + namespace rwx allow/deny across users |
+| `tests/demo_audit.c` | hash-chained audit detects a one-byte tamper |
+| `tests/demo_encrypt.c` | data + WAL encrypted at rest; wrong password locked out |
+| `tests/test_secure.c` | server AUTH gate + rwx enforcement + intact audit chain |
 
-Build the security demos (need libsodium): `make demo_crypto demo_auth`.
+Build the security demos (need libsodium): `make demo_crypto demo_audit demo_auth`.
 
 ## Layout
 
 ```
 include/  storage.h wal.h recovery.h bufferpool.h replacement.h
           threadpool.h scheduler.h protocol.h server.h
-          crypto.h auth.h permissions.h
+          crypto.h auth.h permissions.h audit.h
 src/      storage.c wal.c recovery.c bufferpool.c replacement.c
           threadpool.c scheduler.c protocol.c server.c client.c durakv.c
-          crypto.c auth.c permissions.c
+          crypto.c auth.c permissions.c audit.c encryption.c webserver.c
+web/      dashboard.html                 (browser control room)
 tests/    test_storage.c test_wal_recovery.c test_bufferpool.c test_belady.c
           mem_demo.c demo_race.c demo_deadlock.c demo_scheduler.c loadtest.c
           demo_mqueue.c test_ipc.c
-          file_demo.c demo_crypto.c demo_auth.c
-scripts/  crashtest.sh
+          file_demo.c demo_crypto.c demo_auth.c demo_audit.c demo_encrypt.c
+          test_secure.c
+scripts/  crashtest.sh run_demo.sh
 ```
 
 ## Tests
@@ -247,5 +289,5 @@ scripts/  crashtest.sh
 | `tests/mem_demo.c` | a simple pointer-level paging + FIFO demonstration |
 | `tests/demo_*` / `loadtest` | concurrency (see the Phase 3 table above) |
 | `tests/test_ipc.c` / `demo_mqueue.c` | network/IPC (see the Phase 4 table above) |
-| `tests/file_demo.c` / `demo_crypto.c` / `demo_auth.c` | security (see the Phase 5 table above) |
+| `tests/file_demo.c` / `demo_*` / `test_secure.c` | security (see the Phase 5 table above) |
 | `scripts/crashtest.sh` | committed keys survive repeated `kill -9`; `make crashtest_concurrent` does it with 4 writer threads |

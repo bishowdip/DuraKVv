@@ -1,32 +1,11 @@
 /*
- * bufferpool.c -- an in-RAM page cache (Task 2: virtual-memory/paging).
- *
- * The buffer pool sits between the store and the disk file. A fixed number of
- * `nframes` frames each hold one PAGE_SIZE page. Callers ask for a page by id
- * via bp_pin(); if it is already resident that is a HIT, otherwise it is a page
- * FAULT and the pool loads it from disk -- evicting another page first if every
- * frame is occupied. This is the software analogue of an OS/MMU page cache, and
- * the hit/miss counters here are what test_bufferpool reports.
- *
- * Two design choices carry the durability and memory stories:
- *
- *  1. WRITE-BACK, not write-through. A modified (dirty) page is NOT written to
- *     disk immediately; it is flushed only on eviction, bp_flush_all(), or
- *     close. This is faster (many updates to a hot page cost one disk write)
- *     and, crucially, means dirty pages live only in this process's RAM -- so a
- *     kill -9 genuinely loses them, which is what makes the WAL redo pass a real
- *     recovery test rather than one masked by the OS page cache.
- *
- *  2. A pluggable I/O hook (bp_set_io). By default the pool reads/writes raw
- *     pages through `fd`. The storage engine installs callbacks so that every
- *     page passes through one encryption choke point (encryption-at-rest),
- *     keeping storage.c/recovery.c free of crypto code.
- *
- * PINNING prevents eviction of a page currently in use: bp_pin increments a pin
- * count and returns the frame's buffer; the page cannot be chosen as a victim
- * until the matching bp_unpin drops the count to 0. One mutex serialises the
- * whole table so concurrent threads can fault pages safely. See
- * include/bufferpool.h.
+ * bufferpool.c - page cache, the software version of an OS page cache.
+ * bp_pin resolves page id -> frame: resident = HIT, else FAULT (load from
+ * disk, evicting a victim if full). write-back not write-through: dirty
+ * frames only flush on eviction/flush_all, so kill -9 genuinely loses them
+ * and redo gets tested for real. pin count > 0 = not evictable. one mutex
+ * over the whole table. io hook (bp_set_io) so every transfer goes through
+ * storage's page_read/page_write = the encryption choke point.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "bufferpool.h"
@@ -81,9 +60,7 @@ void bp_destroy(BufferPool *bp)
     free(bp);
 }
 
-/* Read a page from disk into a frame; pages past EOF come back empty/valid.
- * If a custom I/O callback is installed (the storage engine's encryption-aware
- * path), use it; otherwise read the raw page directly. */
+/* disk -> frame. past-EOF pages come back empty. io hook wins if installed. */
 static void load_from_disk(BufferPool *bp, uint64_t page_id, uint8_t *dst)
 {
     if (bp->io_read) { bp->io_read(bp->io_ctx, page_id, dst); return; }
@@ -91,8 +68,7 @@ static void load_from_disk(BufferPool *bp, uint64_t page_id, uint8_t *dst)
     if (n < (ssize_t)PAGE_SIZE) page_init(dst, page_id);
 }
 
-/* Flush one frame to disk if (and only if) it holds unsaved changes. Clearing
- * the dirty bit afterwards makes repeated flushes cheap and idempotent. */
+/* flush one frame if dirty, then clear the bit so re-flushing is free. */
 static void writeback(BufferPool *bp, Frame *f)
 {
     if (!f->valid || !f->dirty) return;
@@ -125,13 +101,7 @@ static Frame *find_resident(BufferPool *bp, uint64_t page_id, size_t *idx)
     return NULL;
 }
 
-/*
- * Pin a page and return a pointer to its bytes. This is the pool's core: it
- * resolves a page id to a resident frame, faulting it in on a miss and evicting
- * a victim if the pool is full. The returned buffer stays valid until the
- * caller bp_unpin()s it. Returns NULL only if every frame is pinned (no victim
- * available).
- */
+/* the core. NULL only if every frame is pinned (no victim available). */
 uint8_t *bp_pin(BufferPool *bp, uint64_t page_id)
 {
     pthread_mutex_lock(&bp->mtx);
@@ -208,9 +178,8 @@ void bp_flush_all(BufferPool *bp)
     pthread_mutex_unlock(&bp->mtx);
 }
 
-/* Snapshot the counters. The parameter is const for callers, but we must cast
- * it away to take the mutex (locking mutates the lock) -- reading shared stats
- * without the lock would be a data race. */
+/* counters under the lock (reading them without it would be a data race;
+ * const gets cast away because locking mutates the mutex). */
 BPStats bp_stats(const BufferPool *bp)
 {
     BufferPool *m = (BufferPool *)bp;

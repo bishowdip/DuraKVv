@@ -1,26 +1,15 @@
 /*
- * protocol.c -- the wire protocol and socket helpers for Task 4 (client-server
- * IPC over AF_UNIX Unix-domain sockets).
+ * protocol.c - task 4 wire protocol over AF_UNIX (unix domain sockets).
  *
- * A SOCK_STREAM socket is a BYTE STREAM with no message boundaries: one write()
- * may be split across several read()s, or several writes coalesced into one
- * read. So we cannot assume "one read == one message". Two mechanisms fix this:
+ * why not tcp/ip: this is LOCAL ipc. af_unix = same socket api but no
+ * network stack, faster, and access control comes free from filesystem
+ * permissions on the socket path. thats the research answer for the brief.
  *
- *  1. Exact-length I/O (io_read_all/io_write_all) loops until the requested
- *     number of bytes has actually been transferred, transparently handling
- *     partial transfers and retrying on EINTR (interrupted syscalls).
- *
- *  2. Length-prefixed framing (frame_write/frame_read): every message is
- *     preceded by a 4-byte big-endian length, so the reader knows exactly how
- *     many payload bytes to expect. Big-endian is "network byte order", the
- *     conventional on-the-wire choice. A declared length over the cap or the
- *     protocol maximum is rejected as a protocol violation (input validation --
- *     it stops a malicious/oversized frame from overrunning the buffer).
- *
- * The remaining helpers wrap the AF_UNIX socket lifecycle (listen/connect on a
- * filesystem path). Unix-domain sockets are used instead of TCP/IP because this
- * is LOCAL IPC: no network stack, lower overhead, and access is governed by
- * filesystem permissions on the socket path. See include/protocol.h.
+ * SOCK_STREAM is a byte stream with no message boundaries (one write can be
+ * split across reads or merged), so: io_read_all/io_write_all loop until
+ * exactly n bytes moved (and retry EINTR), and every message carries a
+ * 4-byte big-endian length prefix. an oversized declared length is rejected
+ * before reading = input validation against a hostile frame.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "protocol.h"

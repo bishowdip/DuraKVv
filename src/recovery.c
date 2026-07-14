@@ -1,24 +1,8 @@
 /*
- * recovery.c -- crash recovery, a simplified form of the ARIES algorithm.
- *
- * Run once at startup, this brings the data file to a consistent state after a
- * crash by replaying the WAL in three passes:
- *
- *   1. ANALYSIS -- scan forward from the last checkpoint to learn which
- *      transactions COMMITTED (winners) and which were still in flight
- *      (losers), and the highest LSN/txn ids seen.
- *   2. REDO -- re-apply the after-image of every committed update, so all
- *      acknowledged work is present even if its data page never reached disk.
- *   3. UNDO -- restore the before-image of every uncommitted update, so a
- *      partially-applied loser transaction leaves no trace ("atomicity").
- *
- * The crucial property is IDEMPOTENCE: redo compares each page's stored
- * page_lsn against the record's lsn and re-applies only when page_lsn < lsn.
- * A page already carrying that change (page_lsn >= lsn) is skipped. This makes
- * recovery safe to crash *during* and re-run from scratch -- exactly why the
- * crashtest can kill the process repeatedly and never lose or double-apply
- * data. Because each record holds a full page image, redo/undo also transparently
- * repair a torn (half-written) page. See include/recovery.h.
+ * recovery.c - simplified ARIES: analysis -> redo -> undo over the WAL.
+ * the key trick is idempotence: redo only applies where page_lsn < record
+ * lsn, so crashing DURING recovery is fine, it just re-runs. full page
+ * images also mean a torn page write gets repaired for free.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "recovery.h"
@@ -33,6 +17,19 @@ static int committed(const uint64_t *set, size_t n, uint64_t txn)
 {
     for (size_t i = 0; i < n; i++) if (set[i] == txn) return 1;
     return 0;
+}
+
+/* get a plaintext page out of a WAL image that may be sealed. 1 = ok,
+ * 0 = wrong key/corrupt/bad length. codec fn ptrs only, no sodium here. */
+static int wal_image(DB *db, const uint8_t *src, uint32_t len, uint8_t *img)
+{
+    if (db->codec) {
+        long m = db->codec->open(db->codec->ctx, src, len, img);
+        return m == (long)PAGE_SIZE;
+    }
+    if (len != PAGE_SIZE) return 0;
+    memcpy(img, src, PAGE_SIZE);
+    return 1;
 }
 
 int recovery_run(DB *db)
@@ -61,19 +58,18 @@ int recovery_run(DB *db)
     }
 
     uint8_t page[PAGE_SIZE];
+    uint8_t img[PAGE_SIZE];
 
     /* ---- Redo: re-apply committed after-images, idempotently ----------- */
     for (size_t i = start; i < n; i++) {
         WalRecord *r = &recs[i];
         if (r->type != WAL_UPDATE) continue;
         if (!committed(commit_set, ncommit, r->txn_id)) continue;
-        if (r->after_len != PAGE_SIZE) continue;
+        if (!wal_image(db, r->after, r->after_len, img)) continue;   /* wrong key */
         page_read(db, r->page_id, page);
-        /* Idempotency check: only apply if the page has not already absorbed
-         * this change. Skipping when page_lsn >= r->lsn is what lets recovery
-         * be re-run any number of times without corrupting data. */
+        /* the idempotence check: skip if the page already has this change */
         if (page_get_lsn(page) < r->lsn) {
-            memcpy(page, r->after, PAGE_SIZE);
+            memcpy(page, img, PAGE_SIZE);
             page_write(db, r->page_id, page);
         }
     }
@@ -84,9 +80,9 @@ int recovery_run(DB *db)
         if (r->type != WAL_UPDATE) continue;
         if (committed(commit_set, ncommit, r->txn_id)) continue;
         if (r->page_id >= db->page_count) continue;   /* never materialised */
-        if (r->before_len != PAGE_SIZE) continue;
+        if (!wal_image(db, r->before, r->before_len, img)) continue;
         page_read(db, r->page_id, page);
-        memcpy(page, r->before, PAGE_SIZE);
+        memcpy(page, img, PAGE_SIZE);
         page_write(db, r->page_id, page);
     }
 

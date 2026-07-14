@@ -1,14 +1,8 @@
 /*
- * auth.c -- user authentication (Task 3): register users, verify logins, issue
- * session ids. An in-memory user store; each user has a group (for the
- * owner/group/other permission model in permissions.c) and an Argon2id password
- * hash.
- *
- * Security note: passwords are NEVER stored or compared in plaintext. Only the
- * one-way Argon2id hash is kept (see crypto.c), so even a memory/disk dump does
- * not reveal the password, and login works by re-hashing the attempt and
- * comparing in constant time.
- * See include/auth.h.
+ * auth.c - register users, verify logins, hand out session ids. in-memory
+ * store, each user has a group (feeds the rwx model in permissions.c).
+ * passwords are never stored or compared in plaintext -- only the argon2id
+ * hash, and verify is constant time.
  */
 #include "auth.h"
 #include "crypto.h"
@@ -51,8 +45,7 @@ static User *find_user(AuthStore *s, const char *user)
     return NULL;
 }
 
-/* Register a new user, hashing the password before it is stored. Fails (-1) if
- * the username already exists or hashing fails; grows the store as needed. */
+/* add a user (password hashed before storing). -1 if name taken. */
 int auth_register(AuthStore *s, const char *user, const char *password,
                   const char *group)
 {
@@ -69,9 +62,8 @@ int auth_register(AuthStore *s, const char *user, const char *password,
     return 0;
 }
 
-/* Authenticate a login attempt. Returns a positive session id on success, or 0
- * on failure. Note both "unknown user" and "wrong password" return the same 0,
- * so the response does not reveal whether the username exists. */
+/* login. session id > 0 on success, 0 on failure. unknown user and wrong
+ * password both return the same 0 on purpose -- dont leak which it was. */
 int auth_login(AuthStore *s, const char *user, const char *password)
 {
     User *u = find_user(s, user);

@@ -1,7 +1,4 @@
-/*
- * test_bufferpool.c -- buffer-pool correctness (page faults, eviction,
- * dirty write-back) plus a FIFO-vs-LRU hit-ratio report across workloads.
- */
+/* test_bufferpool.c - faults/eviction/write-back + FIFO vs LRU hit ratios. */
 #define _POSIX_C_SOURCE 200809L
 #include "bufferpool.h"
 #include "storage.h"

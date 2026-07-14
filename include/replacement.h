@@ -1,18 +1,8 @@
 /*
- * replacement.h -- Pluggable page-replacement policies (DuraKV Phase 2).
- *
- * OS/systems primitive: page-replacement algorithms (FIFO, LRU).
- *
- * The buffer pool delegates victim selection to a Replacer. Each policy is a
- * small vtable of function pointers, so adding CLOCK or LRU-K later is just
- * another Policy instance -- nothing in the buffer pool changes.
- *
- * Both shipped policies are driven by a per-frame "stamp" (a logical clock):
- *   - FIFO stamps a frame only when a page is loaded into it; the victim is
- *     the oldest stamp. Accesses are ignored -- so FIFO can suffer Belady's
- *     anomaly (more frames -> more faults; see tests/test_belady.c).
- *   - LRU additionally re-stamps a frame on every access; the victim is the
- *     least-recently-used. LRU is a stack algorithm and cannot suffer Belady.
+ * replacement.h - page replacement policies (FIFO, LRU) behind a vtable, so
+ * the pool never cares which one is running. both use a per-frame stamp:
+ * FIFO stamps on load only (-> can suffer belady's anomaly), LRU re-stamps
+ * on every access (stack algorithm, cant suffer it). victim = oldest stamp.
  */
 #ifndef DURAKV_REPLACEMENT_H
 #define DURAKV_REPLACEMENT_H

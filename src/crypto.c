@@ -1,26 +1,10 @@
 /*
- * crypto.c -- the cryptographic primitives for Task 3, thin wrappers over
- * libsodium so the rest of the code never touches raw crypto.
- *
- * Two building blocks:
- *
- *  - AEAD seal/open using XChaCha20-Poly1305. "AEAD" = Authenticated Encryption
- *    with Associated Data: it provides BOTH confidentiality (the plaintext is
- *    hidden) AND integrity (any tampering is detected, because decryption of a
- *    modified ciphertext fails the Poly1305 tag check). XChaCha20 is chosen over
- *    AES-GCM because (a) it needs no AES hardware to be fast and constant-time
- *    in software, and (b) its 192-bit (24-byte) nonce is large enough that
- *    random nonces effectively never collide -- so we can pick a fresh random
- *    nonce per message without a counter, which is what crypto_seal does.
- *
- *  - Password handling with Argon2id, a MEMORY-HARD key-derivation function.
- *    Being memory-hard means an attacker cannot cheaply parallelise guesses on
- *    GPUs/ASICs (each guess must allocate a large memory buffer), which is what
- *    makes it far stronger than a plain hash for passwords. Used both to derive
- *    the encryption-at-rest key from a master password (crypto_derive_key) and
- *    to store login passwords (crypto_password_hash/verify).
- *
- * See include/crypto.h for sizes and the sealed-blob layout.
+ * crypto.c - the only crypto in the project, wrapped so nothing else
+ * touches raw libsodium.
+ * - seal/open = XChaCha20-Poly1305 AEAD: hides the plaintext AND detects
+ *   tampering (poly1305 tag fails on any modified byte).
+ * - Argon2id for passwords/keys: memory hard, so gpu farms cant cheaply
+ *   brute force it like a plain hash.
  */
 #include "crypto.h"
 
@@ -34,18 +18,15 @@ int crypto_init(void)
     return sodium_init() < 0 ? -1 : 0;     /* idempotent; -1 only on failure */
 }
 
-/* Generate a random salt using the OS CSPRNG. A per-database salt ensures two
- * databases with the same password derive different keys (defeats rainbow
- * tables and cross-database key reuse). */
+/* random salt from the OS csprng. per-db salt = same password still gives
+ * different keys on different dbs (kills rainbow tables). */
 void crypto_random_salt(uint8_t salt[CRYPTO_SALTBYTES])
 {
     randombytes_buf(salt, CRYPTO_SALTBYTES);
 }
 
-/* Derive a symmetric encryption key from a password + salt via Argon2id.
- * Interactive cost parameters trade brute-force resistance against latency
- * suitable for an interactive login. Deterministic: same password+salt -> same
- * key, which is how the correct password unlocks an existing database. */
+/* password + salt -> key (argon2id). deterministic: same inputs = same key,
+ * which is how the right password unlocks an existing db. */
 int crypto_derive_key(uint8_t key[CRYPTO_KEYBYTES], const char *password,
                       const uint8_t salt[CRYPTO_SALTBYTES])
 {
@@ -55,9 +36,8 @@ int crypto_derive_key(uint8_t key[CRYPTO_KEYBYTES], const char *password,
                          crypto_pwhash_ALG_ARGON2ID13);
 }
 
-/* Encrypt+authenticate `plen` bytes into `out`, returning the total length.
- * Output layout is [24-byte nonce][ciphertext+16-byte tag]; the nonce is stored
- * in the clear (it is not secret, only unique) so crypto_open can recover it. */
+/* encrypt+tag into out = [24B nonce][cipher+16B tag]. nonce is stored in
+ * the clear -- it only has to be unique, not secret. */
 size_t crypto_seal(uint8_t *out, const uint8_t *plain, size_t plen,
                    const uint8_t key[CRYPTO_KEYBYTES])
 {
@@ -71,9 +51,8 @@ size_t crypto_seal(uint8_t *out, const uint8_t *plain, size_t plen,
     return CRYPTO_NONCEBYTES + (size_t)clen;
 }
 
-/* Verify+decrypt a blob produced by crypto_seal. Returns the plaintext length,
- * or -1 if the input is too short, was tampered with, or the key is wrong --
- * the three are indistinguishable by design (the tag check just fails). */
+/* verify+decrypt. -1 for too-short, tampered, or wrong key -- deliberately
+ * indistinguishable, the tag check just fails. */
 long crypto_open(uint8_t *out, const uint8_t *in, size_t inlen,
                  const uint8_t key[CRYPTO_KEYBYTES])
 {
@@ -98,9 +77,7 @@ int crypto_password_hash(char out[CRYPTO_PWHASH_STRBYTES], const char *password)
                              crypto_pwhash_MEMLIMIT_INTERACTIVE);
 }
 
-/* Check a password against a stored hash. libsodium's verify re-derives using
- * the parameters encoded in the hash string and compares in constant time, so
- * it leaks nothing timing-wise. Returns 0 on match, -1 otherwise. */
+/* verify against the stored hash. constant time, leaks nothing. 0 = match. */
 int crypto_password_verify(const char *hash_str, const char *password)
 {
     return crypto_pwhash_str_verify(hash_str, password, strlen(password)) == 0 ? 0 : -1;

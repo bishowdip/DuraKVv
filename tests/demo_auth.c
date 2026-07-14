@@ -1,11 +1,7 @@
 /*
- * demo_auth.c -- authentication + access control (Task 3).
- *
- * Part 1: register users with Argon2id-hashed passwords; the right password
- *         logs in, a wrong one (and an unknown user) is rejected.
- * Part 2: a namespace "users" owned by alice (group staff) with mode 0640
- *         (owner rw, group r, other ---). The rwx checks then allow/deny each
- *         caller exactly as the bits dictate -- the POSIX model applied to keys.
+ * demo_auth.c - part 1: argon2id login (right password in, wrong/unknown
+ * out). part 2: namespace "users" = alice:staff 0640, the rwx checks then
+ * allow/deny exactly like unix file bits would.
  */
 #include "auth.h"
 #include "permissions.h"
