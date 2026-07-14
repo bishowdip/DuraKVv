@@ -4,8 +4,9 @@ A crash-safe, multi-client key–value store in C, built in layers: the durable
 spine (storage + write-ahead log + crash recovery), a buffer pool (paging with
 FIFO/LRU eviction), concurrency (thread pool, round-robin scheduler, a
 thread-safe store), network/IPC (an AF_UNIX client/server), and a security
-layer (encryption, authentication, permissions). The core engine needs only
-**pthreads** (in libc); **libsodium** is confined to the security demos.
+layer (encryption, authentication, permissions, audit). Dependencies:
+**pthreads** (in libc) and **libsodium** for the security layer — the
+storage/recovery core itself never touches libsodium.
 
 ## Build & run
 
@@ -220,8 +221,9 @@ above, which contains no TCP/IP.
 
 ## Security (Phase 5)
 
-Built on **libsodium** (`brew install libsodium`); the security demos link it,
-while the core engine stays dependency-free.
+Built on **libsodium** (`brew install libsodium`). Only the security modules
+link it; `storage.c`/`recovery.c` reach encryption through function pointers
+and never include a libsodium header.
 
 - **File permissions** (`tests/file_demo.c`) — the POSIX model directly:
   `open`/`creat` with a mode, `chmod` to change rwx, `access()` to query, and

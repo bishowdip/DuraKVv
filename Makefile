@@ -1,6 +1,6 @@
-# DuraKV -- durable storage engine, buffer pool, concurrency, AF_UNIX IPC and a
-# security layer. The core engine needs only pthreads (in libc); libsodium is
-# confined to the security demos below (crypto/auth) via SODIUM_CFLAGS/LIBS.
+# DuraKV - durable kv engine + buffer pool + threads + af_unix ipc + security.
+# storage.c/recovery.c never touch libsodium (codec goes through fn pointers);
+# sodium links only into the security modules and the binaries that use them.
 
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -g -Iinclude -pthread
