@@ -32,6 +32,7 @@
 # runtime data files
 *.db
 *.log
+*.wal
 *.snap
 
 # documentation / reports / figures -- LOCAL ONLY (only README.md is tracked)
